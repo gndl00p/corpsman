@@ -42,44 +42,74 @@ parse, and the MCP server does not advertise them.
 
 Arming switches to **DEVIL DOC** — doc picked up a rifle.
 
-### Why a mode instead of a flag
+### What arming is, and what it is not
 
-A flag can be pasted from a wiki, recalled from shell history, inherited from a script
-someone copied, or produced by an LLM completing a command. A mode entered by a held
-physical keypress at a real terminal cannot arrive by any of those routes.
+**Arming is an anti-footgun control, not a security boundary.** Saying otherwise would be
+theater, so the distinction is stated here and the marketing copy is held to it.
+
+It does **not** stop an adversary who already has a root shell. Such an actor can allocate
+a pty with `script`, `expect`, or `ssh -t`, drive keystrokes with `tmux send-keys`,
+`xdotool`, `ydotool`, or Windows `SendInput`, or simply skip this tool and run `dd`. An
+LLM with shell access and the ability to allocate a pty is in exactly the same position.
+
+That is an acceptable limitation because **anyone who can do those things does not need
+corpsman to destroy a disk.** The tool is not the weakest link in that threat model and
+should not pretend to be the strongest.
+
+What arming *does* reliably prevent is the failure mode that actually happens on a bench:
+a destructive command arriving by accident. A pasted command block, a recalled shell
+history entry, a script someone copied from a wiki, a CI job that inherited the wrong
+arguments, or a tab-completion that landed one device off. Those are the realistic ways
+a drive gets wiped by mistake, and a held physical keypress stops every one of them.
 
 ### Arming mechanism
 
 1. **`stdin` must be a TTY.** If it is a pipe, a file, a heredoc, a CI runner, or an MCP
-   transport, arming is impossible and there is no override. This single rule closes
-   paste-injection, accidental automation, and every prompt-injection path through the
-   MCP server at once.
+   transport, arming is refused with no override.
 2. **Held chord, not tapped.** `ctrl+alt+D` held for 3 seconds, read in raw terminal mode
-   via `termios` on POSIX and `msvcrt` on Windows — both stdlib. A hold cannot be
-   expressed in a pasted string. The hold renders a progress meter; releasing early
-   aborts.
-3. **Process-scoped only.** The armed state lives in process memory. It is never written
-   to disk, never exported to the environment, and never inherited by a child process.
-4. **Expires.** 10 minutes idle, or on any subcommand completing, whichever is first.
-   The remaining time is displayed in the persistent banner.
-5. **Loud.** While armed, every prompt is prefixed and the banner stays on screen. There
-   is no quiet destructive state.
+   via `termios` on POSIX and `msvcrt` on Windows — both stdlib. The hold renders a
+   progress meter; releasing early aborts.
+3. **Process-scoped only.** Armed state lives in process memory. Never written to disk,
+   never exported to the environment, never inherited by a child process.
+4. **Expires.** 10 minutes idle. **Expiry is re-checked immediately before every
+   destructive operation, not once at startup** — see the dispatch rule below.
+5. **Loud.** The banner stays on screen and every prompt is prefixed. There is no quiet
+   destructive state.
+
+### One parser, enforcement at dispatch
+
+An earlier draft said destructive subcommands were "not registered" in AID STATION, with
+the parser built conditionally from the mode at startup. That is a bug factory: the mode
+is evaluated once at parse time, so either a session that arms interactively mid-process
+can never reach the destructive commands, or a parse-time decision outlives the 10-minute
+expiry it was supposed to respect.
+
+**The parser is built once, statically, and always contains every subcommand.** Mode is
+enforced at dispatch and re-checked inside the execution wrapper immediately before the
+first destructive syscall. `--help` hides destructive commands in AID STATION as a
+usability affordance only; hiding is never the enforcement mechanism.
 
 ### Scripted and batch use
 
-Arming is interactive-only by design, so bench automation uses a separate path that
-cannot be reached by pasting a command: the existing
-`--device / --confirm-token / --yes-i-am-sure` triple, **plus** the environment variable
-`CORPSMAN_DEVIL_DOC=1`, which must be set in the operator's shell rather than inside the
-script being run. A copy-pasted command block therefore cannot self-arm, and a script
-committed to a repo cannot arm itself on someone else's machine.
+An earlier draft gated batch use behind `CORPSMAN_DEVIL_DOC=1` "set in the operator's
+shell rather than in the script." That is theater — nothing stops a pasted block from
+containing the `export` line itself. It has been removed rather than left in to feel
+reassuring.
+
+The real control is the one already in the design: **`--confirm-token` is device-specific
+and cannot be guessed.** It is derived from the composite identity of a particular
+physical device, and the only way to obtain it is to run `doc inspect` against that device
+first. A batch script therefore cannot name a device it has not already enumerated on that
+machine, and a script copied from elsewhere carries tokens that resolve to nothing locally.
+
+Batch mode additionally refuses to run if any supplied token does not resolve to a
+currently-present device, and prints every target for review before the first write.
 
 ### MCP is never armed
 
-`doc serve-mcp` runs permanently in AID STATION. The transport is not a TTY, so arming is
-structurally impossible rather than merely disallowed — the check is the same one that
-protects every other non-interactive path. `wipe` and `restore` are absent from the
-advertised tool list entirely, and a test asserts it.
+`doc serve-mcp` runs permanently in AID STATION, and its transport is not a TTY. `wipe`
+and `restore` are also absent from the advertised tool list entirely, and a test asserts
+it. The absence is the control here — the TTY check is a backstop, not the guarantee.
 
 ## Voice and terminology
 
@@ -115,17 +145,93 @@ Four layers are common to every subcommand:
 - `record` — hash-chained append-only ledger at `~/.corpsman/ledger.jsonl`. Inspections,
   tests, images, and wipes all append. The chain makes retroactive edits detectable.
 
-## Zero-dependency posture
+## Zero-dependency posture, and why it is a build artifact rather than a source layout
 
-Python 3.8+, stdlib only, one file. `ctypes` covers the Windows volume-lock ioctls;
-`plistlib` covers macOS `diskutil`; `/sys` and `/proc` cover Linux without udev.
+Python 3.8+, stdlib only. `ctypes` covers the Windows volume-lock ioctls; `plistlib`
+covers macOS `diskutil`; `/sys` and `/proc` cover Linux without udev.
 
-External binaries are accelerators, never requirements. Their absence lowers what the
-tool can *claim*, never what it can *safely do*.
+External binaries are accelerators, never requirements. Their absence lowers what the tool
+can *claim*, never what it can *safely do*.
 
-This includes the MCP server: MCP over stdio is JSON-RPC 2.0 on stdin/stdout, which is
-implementable in stdlib. No SDK, so `doc serve-mcp` runs from the same single file on a
-machine with nothing installed.
+**The single file is a distribution artifact, not the way the source is maintained.** An
+earlier draft called for literally writing one file. At this scope — six subcommands,
+three OS backends, SMART parsing across three transports, ddrescue-class imaging, and an
+MCP server — a monolith means an edit to the SMART parser sits in the same file as the
+wipe execution path, with no module boundary to contain a mistake. For a tool whose
+failure modes are destructive, that is the wrong trade.
+
+Source is organised one module per architectural layer: `identity`, `topology`, `probe`,
+`smart`, `strategy`, `execute`, `image`, `record`, `mcp`, and a thin CLI entrypoint. A
+build step concatenates them into a single `doc` script for distribution, so the property
+that actually matters to the operator — one file, copy it to a rescue USB, run it offline
+— is preserved without maintaining a monolith. The build output is checked for import
+purity so a stdlib-only guarantee cannot regress silently.
+
+## Operational invariants
+
+These apply to every subcommand and are specified once here rather than repeated.
+
+### Exclusive device locking
+
+Nothing in an earlier draft prevented two instances from operating on one device — a
+realistic bench scenario with two techs, or one tech and a forgotten SSH session. Both
+would pass preflight independently and then interleave.
+
+Before any destructive or imaging operation, the tool takes an **exclusive kernel-level
+lock on the device**, not merely a lockfile: on Linux, opening the block device with
+`O_EXCL` is refused by the kernel if the device is mounted or already held, which is a far
+stronger guarantee than advisory locking. This is backed by a lockfile keyed to the
+identity token, carrying PID and start time for stale-lock detection, so the operator gets
+a comprehensible message rather than an opaque `EBUSY`. Windows uses the existing
+`FSCTL_LOCK_VOLUME` acquisition; macOS uses `diskutil unmountDisk` plus an exclusive open.
+
+The lock is held for the entire operation and released on exit, including on signal.
+
+### Interruption and crash lifecycle
+
+`SIGINT` and `SIGTERM` handlers atomically write an `INTERRUPTED` record with the byte
+offset reached, release the device lock, and exit non-zero. Power loss leaves the lockfile
+and an unclosed run record behind by design.
+
+On the next invocation against the same identity, an unclosed prior run is detected and
+the tool **refuses to certify** that device until the operator explicitly reconciles it.
+A run that died halfway must never be indistinguishable from one that completed.
+
+### Long-running operations survive terminal death
+
+A multi-terabyte wipe or image outlives SSH sessions and laptop lids. Every long-running
+command gets a persistent run-session ID and writes progress state, so it can be detached,
+polled with `doc status <session>`, and resumed rather than restarted. Restarting a
+14-hour wipe because a laptop slept is an unacceptable failure mode, and guessing whether
+partial progress can be trusted is worse.
+
+### Privilege is checked, never degraded into
+
+Running unprivileged makes some ioctls and `/sys` reads fail silently, yielding partial
+SMART data and truncated topology — and a verdict computed from incomplete data with no
+indication it was incomplete. Any command touching a raw device performs an explicit
+privilege preflight and **refuses to run** rather than proceeding degraded.
+
+### Locale is pinned on every subprocess
+
+`smartctl`, `hdparm`, and friends change their output under a non-English locale, which
+silently breaks parsing and feeds a wrong health verdict into everything downstream. Every
+external invocation is made with `LC_ALL=C` and `LANG=C`, and JSON output is preferred
+wherever the tool offers it. Ambiguous output fails closed.
+
+### Unsupported platforms are refused, not guessed
+
+Device path conventions differ enough between platforms that a best-guess backend on an
+unrecognised OS is a destructive-path hazard. Platform detection is a hard gate at
+startup: outside the explicitly supported set, destructive and imaging commands refuse to
+run. `inspect` may still run read-only with a clear "unsupported platform" banner.
+
+### Time on a certificate is operator-controllable, and says so
+
+Wall-clock time comes from a machine the operator controls and can be set backwards. Runs
+record both wall-clock timestamps and monotonic elapsed time, and where a reference is
+reachable the tool checks for significant clock skew and flags it on the record. The
+certificate states plainly that its timestamp is locally sourced.
 
 ---
 
@@ -171,18 +277,66 @@ the machine and kills the next one. When 199 is nonzero, the tool says so in tho
 
 **Health verdict** — the actual bench decision, stated plainly:
 
-- `SCRAP` — SMART overall self-assessment FAILED, or any of 5/197/198 nonzero, or NVMe
-  `available_spare` below threshold, or `media_errors` nonzero, or a failed long
-  self-test. Drive does not go back into service, and per the wipe spec its sanitization
-  verdict is capped at `DESTROY_REQUIRED` because remapped sectors retain data.
-- `SCRATCH_ONLY` — 187 or 188 nonzero, NVMe `percentage_used` over 90, very high
-  power-on hours, or sustained thermal excursions. Works, but nothing irreplaceable goes
-  on it.
+- `SCRAP` — SMART overall self-assessment FAILED, a failed extended self-test, NVMe
+  `available_spare` below its threshold, `media_errors` nonzero, **or** reallocated or
+  pending sectors above threshold *or growing between inspections*.
+- `SCRATCH_ONLY` — nonzero but stable-and-below-threshold 5/197/198, nonzero 187 or 188,
+  NVMe `percentage_used` over 90, very high power-on hours, or sustained thermal
+  excursions.
 - `REUSE` — clean.
 - `UNKNOWN` — SMART could not be read. Explicitly not the same as healthy, and the tool
   never collapses these two.
 
-Every verdict prints the specific attribute values that produced it. No opaque scores.
+**Thresholds and trend, not nonzero.** An earlier draft condemned any drive with a single
+nonzero 5/197/198. That is wrong in practice: a 10 TB drive that remapped three sectors
+in year one and none since is a working drive, and a rule that bins it would condemn most
+of the used enterprise inventory that crosses a bench. What predicts failure is
+*magnitude* against the drive's own spare capacity and *rate of change* — a pending count
+climbing across two inspections a week apart is far more alarming than a static count ten
+times its size. The ledger already stores prior inspections of the same identity token,
+so trend is available for free on any drive seen before. A drive seen for the first time
+is judged on thresholds alone and says so.
+
+Every verdict prints the specific attribute values, thresholds, and where available the
+prior reading and delta, that produced it. No opaque scores.
+
+**Raw versus normalized values are handled explicitly.** Vendors encode SMART raw fields
+inconsistently — temperature packed alongside min/max in one 48-bit field, 64-bit counters
+split into halves, some attributes meaningful only as normalized values. The tool reads
+`smartctl --json` and treats the raw field as vendor-opaque unless the attribute is one of
+the small set with reliable cross-vendor semantics. Anything it cannot interpret with
+confidence is reported as raw and excluded from the verdict rather than guessed at, and
+the JSON schema is version-checked with defensive parsing, since smartctl's output has
+changed shape across releases.
+
+### Health verdict does not determine sanitization verdict
+
+The two specs previously contradicted each other here: this document said `SCRAP` capped
+sanitization at `DESTROY_REQUIRED`, while the wipe spec said nonzero reallocated sectors
+forced at best `INCOMPLETE`. Both were wrong, and the aggressive reading would have made
+the tool useless for its primary purpose — nearly every used enterprise drive has some
+remap history, so every certificate would have said "physically destroy this."
+
+**They are separate questions and are now computed independently.**
+
+- The **health verdict** answers "should this go back into service." It is about
+  reliability.
+- The **sanitization verdict** answers "is the data gone." It is about the method that
+  ran and the evidence that it worked.
+
+A drive with remapped sectors that completed a verified ATA Secure Erase is `PURGED`.
+Hardware sanitize commands operate below the LBA layer and erase remapped and
+over-provisioned blocks too — that is precisely why they outrank overwrite, and refusing
+to credit them on a drive with remaps would invert the whole point.
+
+A drive with remapped sectors that could only be *overwritten* is `CLEARED`, carrying an
+explicit disclosure on the certificate that N remapped sectors were not addressable by
+overwrite and may retain data. The operator, or their client's policy, decides whether
+that is acceptable. The tool discloses; it does not silently decide for them.
+
+`DESTROY_REQUIRED` is reserved for what it was always meant for: no adequate software
+path exists, an unremovable hidden area was found, or the device threw IO errors that
+left regions unwritten.
 
 ## `doc test`
 
@@ -205,6 +359,32 @@ confirmation as `wipe`.
 
 `recover` is error-tolerant, ddrescue-shaped, because the drives most worth capturing are
 the ones actively dying.
+
+### Reading a failing drive is not harmless
+
+An earlier draft allowed `recover` freely in AID STATION on the reasoning that reads are
+safe. They are safe for the *data* but not for the *media*. Sustained retry on a failing
+drive keeps the heads loaded and the platters spinning, generates heat, and is a
+well-documented way to convert a drive a professional recovery house could have read into
+one nobody can. The most valuable case — a client's only copy on a dying disk — is exactly
+the case where an amateur retry loop does the most damage.
+
+So `recover` checks health first. On a `SCRAP` or `UNKNOWN` verdict it prints the specific
+failing attributes, states plainly that continuing may destroy data a recovery lab could
+have retrieved, and refuses unless `--accept-media-risk` is passed. For genuinely
+irreplaceable data the correct advice is to stop and send the drive out, and the tool says
+so rather than quietly proceeding.
+
+### The mapfile is GNU ddrescue's format exactly, or it is not claimed
+
+An earlier draft said the progress map was "compatible in spirit" with GNU ddrescue's.
+That phrase is worthless: an operator who resumes a partially-compatible map with real
+ddrescue gets silently wrong region coverage and false confidence about what was read.
+
+The mapfile implements the documented GNU ddrescue format exactly, with interop tests
+asserting round-trip fidelity in both directions against real ddrescue. If that proves
+impractical, the fallback is a clearly-named proprietary format that ddrescue will refuse
+to open. There is no middle option.
 
 - Multi-pass: fast sequential sweep first to capture everything readable, then reverse
   and retry passes narrowing on the bad regions. Reading a dying drive linearly and
@@ -236,6 +416,27 @@ Read-only MCP server over stdio, so a Claude session can ask about drive health 
 
 **Exposed tools:** `list_devices`, `inspect_device`, `get_smart`, `test_status`,
 `read_ledger`.
+
+### Protocol negotiation fails closed
+
+Hand-rolling JSON-RPC is fine; hand-rolling it *loosely* is not. The server implements
+explicit `initialize`/`initialized` handshaking with protocol-version and capability
+checks, and **refuses the session** on an unsupported version rather than best-effort
+accepting fields it does not understand and presenting a stale tool surface to a client
+that assumes compliance. The supported protocol version is pinned and asserted in tests,
+so a spec change surfaces as a clear failure rather than silent drift.
+
+### `read_ledger` is scoped and redacted by default
+
+The ledger accumulates device serials, models, and job history for **every customer the
+MSP has ever worked on**. An unscoped `read_ledger` hands that entire cross-customer
+history to any connected model session, which is a data-exfiltration surface regardless of
+how trustworthy the client is.
+
+`read_ledger` therefore requires a device-identity or session selector — there is no
+"return everything" call. Customer-identifying fields are redacted unless explicitly
+requested for a single specified record, and any unredacted access is itself written to
+the ledger.
 
 **Never exposed:** `wipe` and `restore`. Not behind a flag, not behind a confirmation,
 not present in the tool list at all. The server runs permanently in AID STATION and its

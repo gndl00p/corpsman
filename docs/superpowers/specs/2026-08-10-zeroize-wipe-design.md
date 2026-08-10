@@ -234,12 +234,36 @@ Terminology matters here because it goes on a customer-facing document.
 - `DESTROY_REQUIRED` — no adequate software path exists, or hidden areas / IO errors
   were found. Physical destruction guidance is printed.
 
-**Any IO error, any unreadable or unwritable region, any detected HPA/DCO not removed,
-and any reallocated-sector count above zero forces the verdict to at best `INCOMPLETE`,
-and for hidden areas or media errors to `DESTROY_REQUIRED`.** A dying drive never earns
-a clean certificate. This replaces the earlier "errors are counted but non-fatal"
-behavior, which would have produced exactly the false certificate this tool exists to
-prevent.
+**Any IO error during the run, any region left unwritten or unverified, and any detected
+HPA/DCO that was not removed forces the verdict to `DESTROY_REQUIRED`.** A drive that
+threw errors mid-wipe never earns a clean certificate. This replaces the earlier "errors
+are counted but non-fatal" behavior, which would have produced exactly the false
+certificate this tool exists to prevent.
+
+**Pre-existing reallocated sectors are a disclosure, not an automatic failure.** An
+earlier draft forced any drive with a nonzero reallocated count to at best `INCOMPLETE`,
+which contradicted the parent design and would have made the tool useless — nearly every
+used enterprise drive carries some remap history, so every certificate would have read
+"physically destroy this."
+
+The correct handling depends on which method ran, because the methods differ in whether
+they can reach a remapped block at all:
+
+- A **hardware sanitize** command (ATA Secure Erase, NVMe Sanitize/Format, PSID revert)
+  operates below the LBA layer and erases remapped and over-provisioned blocks along with
+  everything else. That is exactly why it outranks overwrite. A verified hardware sanitize
+  on a drive with remaps is `PURGED`, and refusing to credit it would invert the point.
+- An **overwrite** cannot reach a remapped block through the LBA interface. A verified
+  full-surface overwrite on such a drive is `CLEARED`, and the record carries an explicit
+  disclosure naming the count of remapped sectors that were not addressable and may retain
+  data.
+
+The tool discloses and lets the operator or their client's policy decide. It does not
+silently downgrade a usable result, and it does not silently hide the caveat either.
+
+The health verdict from `doc inspect` never overrides the sanitization verdict. They
+answer different questions — reliability versus data removal — and are computed
+independently.
 
 ## Layer 6 — `record`: append-only and hash-chained
 
@@ -247,13 +271,27 @@ A plain mutable JSON file is worth little as evidence, since the operator who pr
 it can edit it.
 
 Records append to `~/.corpsman/ledger.jsonl`. Each entry carries a SHA-256 over its own
-canonicalized content plus the previous entry's hash, forming a tamper-evident chain.
-The current chain head is printed at the end of every run and can be recorded out-of-band
-in the ticket. `doc ledger --verify` re-walks and validates the chain.
+canonicalized content plus the previous entry's hash. `doc ledger --verify` re-walks and
+validates the chain.
 
-This makes silent retroactive edits detectable. It is not a cryptographic signature and
-the design does not claim to be one; detached signing is a later addition if a client
-contract ever demands it.
+**What the chain is worth, stated honestly.** It detects accidental corruption, partial
+writes, an interrupted append, and edits made by anyone who is not the operator. Against
+the operator themselves it is worth nothing — they hold the file and can regenerate the
+entire chain, internally consistent, in seconds. A hash chain cannot make its own author
+accountable.
+
+That matters because the earlier draft printed the chain head for "recording out-of-band
+in the ticket," which invites a customer to read it as proof. It is not proof.
+
+**Therefore: the chain hash does not appear on a customer-facing certificate unless it has
+been externally anchored.** Anchoring means either a detached signature made with a key
+the operator does not store alongside the ledger, or a third-party timestamp. Neither is
+in scope for the first version, so the first version's certificate carries no chain hash
+and makes no integrity claim — it is a record of what the tool did, attested by the
+operator who ran it, and nothing more.
+
+The chain stays in the local ledger, where its real job is catching corruption and giving
+`doc ledger --verify` something to check.
 
 Per-run human-readable output is also written to `corpsman-<identity_prefix>-<ts>.txt`
 for stapling to a ticket, containing: device identity, media class, hidden-area findings,
