@@ -1,7 +1,12 @@
-# zeroize — cross-platform CLI media sanitization tool
+# zeroize — the `doc wipe` sanitization engine
 
 **Status:** design approved-pending, revised after adversarial review. No implementation yet.
 **Date:** 2026-08-10
+**Parent design:** [2026-08-10-corpsman-design.md](2026-08-10-corpsman-design.md)
+
+This document specifies the `doc wipe` subcommand. The `identify`, `topology`, `probe`,
+and `record` layers described below are shared with `inspect`, `test`, and `image`, and
+are specified in the parent design.
 
 ## Goal
 
@@ -241,16 +246,16 @@ prevent.
 A plain mutable JSON file is worth little as evidence, since the operator who produced
 it can edit it.
 
-Records append to `~/.zeroize/ledger.jsonl`. Each entry carries a SHA-256 over its own
+Records append to `~/.corpsman/ledger.jsonl`. Each entry carries a SHA-256 over its own
 canonicalized content plus the previous entry's hash, forming a tamper-evident chain.
 The current chain head is printed at the end of every run and can be recorded out-of-band
-in the ticket. `zeroize --verify-ledger` re-walks and validates the chain.
+in the ticket. `doc ledger --verify` re-walks and validates the chain.
 
 This makes silent retroactive edits detectable. It is not a cryptographic signature and
 the design does not claim to be one; detached signing is a later addition if a client
 contract ever demands it.
 
-Per-run human-readable output is also written to `zeroize-<identity_prefix>-<ts>.txt`
+Per-run human-readable output is also written to `corpsman-<identity_prefix>-<ts>.txt`
 for stapling to a ticket, containing: device identity, media class, hidden-area findings,
 every method attempted and its independently-confirmed outcome, pass count, bytes
 written vs. device size, verification mode and result, duration, operator, hostname,
