@@ -4,13 +4,17 @@ from corpsman.topology.linux import system_devices
 FIX = os.path.join(os.path.dirname(__file__), "fixtures", "linux")
 LUKS = os.path.join(FIX, "luks-lvm")
 PLAIN = os.path.join(FIX, "plain-sata")
+MDRAID = os.path.join(FIX, "mdraid")
 
 
 def test_resolves_root_through_lvm_and_luks_to_the_physical_disk():
-    # This is the whole point of the layer. / is /dev/mapper/vg-root,
-    # backed by dm-1 -> dm-0 -> sda2 -> sda.
+    # / is /dev/mapper/vg-root = dm-1 -> dm-0 -> sda2 -> sda. Assert the
+    # REASON is "/", not merely that sda appears: /boot reaches sda via
+    # sda1 independently, so bare membership passes even when the chain
+    # walk is broken.
     sysd = system_devices(root=LUKS)
     assert "sda" in sysd
+    assert "/" in sysd["sda"]
 
 
 def test_reason_names_the_mountpoint():
@@ -71,3 +75,19 @@ def test_tmpfs_major_zero_does_not_resolve_to_a_block_device():
     # an error.
     sysd = system_devices(root=LUKS)
     assert all(isinstance(v, list) for v in sysd.values())
+
+
+def test_unreadable_mountinfo_raises_rather_than_returning_empty():
+    # Failing open here would mark every disk as safe to destroy.
+    import pytest
+    from corpsman.topology.linux import TopologyError
+    with pytest.raises(TopologyError):
+        system_devices(root=os.path.join(FIX, "does-not-exist"))
+
+
+def test_partition_on_mdraid_reaches_every_member_disk():
+    # / on md0p1 must flag BOTH array members. Stopping at the virtual
+    # device leaves every member disk destroyable.
+    sysd = system_devices(root=MDRAID)
+    assert "sdc" in sysd
+    assert "sdd" in sysd

@@ -216,7 +216,15 @@ def luks_lvm(root):
     rel_symlink(root, DM0, DM1 + "/slaves/dm-0")
 
     # major:minor resolution, resolving to the same dirs as /sys/block.
+    # Partitions get their own sys/dev/block entry too, same as whole disks
+    # -- the kernel creates one for every block device, not just disks. The
+    # first version of this fixture omitted sda1's (8:1), which meant /boot
+    # silently failed to resolve to any physical device at all: the walk
+    # never even started. Verified against this workstation's real
+    # /sys/dev/block, which has an entry for every partition.
     rel_symlink(root, SDA, "/sys/dev/block/8:0")
+    rel_symlink(root, SDA + "/sda1", "/sys/dev/block/8:1")
+    rel_symlink(root, SDA + "/sda2", "/sys/dev/block/8:2")
     rel_symlink(root, SDB, "/sys/dev/block/8:16")
     rel_symlink(root, DM0, "/sys/dev/block/253:0")
     rel_symlink(root, DM1, "/sys/dev/block/253:1")
@@ -234,12 +242,94 @@ def luks_lvm(root):
       "/dev/dm-0                               partition\t8388604\t\t0\t\t-2\n")
 
 
+SDC = ("/sys/devices/pci0000:00/0000:00:17.0/ata1/host0/target0:0:0/"
+       "0:0:0:0/block/sdc")
+SDD = ("/sys/devices/pci0000:00/0000:00:17.0/ata2/host1/target1:0:0/"
+       "1:0:0:0/block/sdd")
+MD0 = "/sys/devices/virtual/block/md0"
+
+
+def mdraid(root):
+    """/ lives on md0p1, a partition on mdraid array md0, itself made of
+    member disks sdc and sdd.
+
+    A resolver that stops the walk at the first virtual device it meets
+    (rather than climbing from a virtual partition to its whole-device
+    parent) reports zero physical disks here, leaving both array members
+    destroyable. This fixture exists to make that failure impossible to
+    ship.
+    """
+    # Two physical member disks, each with one partition (the raid member).
+    w(root + SDC + "/size", "1953525168")
+    w(root + SDC + "/removable", "0")
+    w(root + SDC + "/queue/rotational", "1")
+    w(root + SDC + "/queue/logical_block_size", "512")
+    w(root + SDC + "/queue/physical_block_size", "512")
+    w(root + SDC + "/device/model", "WDC WD10EZEX-0")
+    w(root + SDC + "/device/vendor", "ATA     ")
+    w(root + SDC + "/sdc1/partition", "1")
+    w(root + SDC + "/sdc1/size", "1953523120")
+
+    w(root + SDD + "/size", "1953525168")
+    w(root + SDD + "/removable", "0")
+    w(root + SDD + "/queue/rotational", "1")
+    w(root + SDD + "/queue/logical_block_size", "512")
+    w(root + SDD + "/queue/physical_block_size", "512")
+    w(root + SDD + "/device/model", "WDC WD10EZEX-0")
+    w(root + SDD + "/device/vendor", "ATA     ")
+    w(root + SDD + "/sdd1/partition", "1")
+    w(root + SDD + "/sdd1/size", "1953523120")
+
+    # md0 = mdraid array over sdc1 + sdd1, itself partitioned (md0p1).
+    w(root + MD0 + "/size", "1953523120")
+    w(root + MD0 + "/removable", "0")
+    w(root + MD0 + "/queue/rotational", "1")
+    w(root + MD0 + "/queue/logical_block_size", "512")
+    w(root + MD0 + "/queue/physical_block_size", "512")
+    w(root + MD0 + "/md0p1/partition", "1")
+    w(root + MD0 + "/md0p1/size", "1953520000")
+
+    # /sys/block/<dev> symlinks into the devices tree, as the kernel does.
+    rel_symlink(root, SDC, "/sys/block/sdc")
+    rel_symlink(root, SDD, "/sys/block/sdd")
+    rel_symlink(root, MD0, "/sys/block/md0")
+
+    # The holder/slave edges: md0 -> [sdc1, sdd1]. Reciprocal holders links
+    # on the member partitions, as the kernel creates them.
+    rel_symlink(root, SDC + "/sdc1", MD0 + "/slaves/sdc1")
+    rel_symlink(root, SDD + "/sdd1", MD0 + "/slaves/sdd1")
+    rel_symlink(root, MD0, SDC + "/sdc1/holders/md0")
+    rel_symlink(root, MD0, SDD + "/sdd1/holders/md0")
+
+    # major:minor resolution, resolving to the same dirs as /sys/block.
+    # md0 is 9:0, its partition md0p1 is 9:1 -- the pair the mount resolves
+    # through. sdc/sdd and their member partitions get realistic majmins too
+    # so nothing dangles.
+    rel_symlink(root, SDC, "/sys/dev/block/8:32")
+    rel_symlink(root, SDC + "/sdc1", "/sys/dev/block/8:33")
+    rel_symlink(root, SDD, "/sys/dev/block/8:48")
+    rel_symlink(root, SDD + "/sdd1", "/sys/dev/block/8:49")
+    rel_symlink(root, MD0, "/sys/dev/block/9:0")
+    rel_symlink(root, MD0 + "/md0p1", "/sys/dev/block/9:1")
+
+    # Device nodes so nothing dangles.
+    for node in ("sdc", "sdc1", "sdd", "sdd1", "md0", "md0p1"):
+        w(root + "/dev/" + node, "")
+
+    # / is md0p1 (9:1).
+    w(root + "/proc/self/mountinfo",
+      "25 1 9:1 / / rw,relatime shared:1 - ext4 /dev/md0p1 rw\n")
+    w(root + "/proc/swaps",
+      "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n")
+
+
 def main():
     for name, builder in (
         ("plain-sata", plain_sata),
         ("fourkn", fourkn),
         ("usb-stick", usb_stick),
         ("luks-lvm", luks_lvm),
+        ("mdraid", mdraid),
     ):
         root = os.path.join(HERE, "linux", name)
         if os.path.isdir(root):
