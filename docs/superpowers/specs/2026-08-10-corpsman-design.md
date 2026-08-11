@@ -57,18 +57,52 @@ depending on `windows-curses` would break the zero-dependency guarantee. Windows
 consoles support VT sequences once `ENABLE_VIRTUAL_TERMINAL_PROCESSING` is set via
 `SetConsoleMode`, reachable through `ctypes`.
 
-Terminal capability is detected rather than assumed. Full-screen requires a TTY, a usable
-`TERM`, and working VT support. Anything else — a serial console, an IPMI text redirect, a
+Anything that fails the capability probe below — a serial console, an IPMI text redirect, a
 recovery shell, a dumb terminal, a CI capture — **falls back to a numbered menu** that uses
-no raw mode and no escape sequences. On a bench these are not hypothetical conditions;
-they are Tuesday.
+no raw mode and no escape sequences. On a bench these are not hypothetical conditions; they
+are Tuesday.
 
-### Terminal state is restored unconditionally
+### Terminal state restoration, and where it genuinely cannot be guaranteed
 
 A tool that leaves the terminal in raw mode after a crash is a tool people stop using. Raw
-mode is entered and exited through a context manager, with restoration additionally wired
-to `atexit` and to the `SIGINT`/`SIGTERM` handlers already specified in the operational
-invariants. `SIGWINCH` triggers a re-layout rather than a corrupted frame.
+mode is entered and exited through a context manager, with restoration wired to `atexit`,
+to an uncaught-exception hook, and to signal handlers for `SIGINT`, `SIGTERM`, and `SIGHUP`.
+`SIGTSTP` restores cooked mode before suspending and `SIGCONT` re-enters raw mode and
+redraws, so job-control suspend does not leave a wrecked terminal or a stale frame.
+`SIGWINCH` triggers re-layout rather than a corrupted frame.
+
+An earlier draft called this unconditional. It is not: **`SIGKILL` and a power cut cannot be
+handled by the process being killed**, and claiming otherwise is the same overclaiming this
+project has already had to correct once. For those cases the tool ships a `doc reset-term`
+subcommand that restores sane terminal state, and the README says plainly that `stty sane`
+does the same job.
+
+Confirmation state is never carried across a suspend/resume boundary. Any pending
+destructive confirmation is discarded on `SIGCONT` and must be re-entered, so a prompt
+cannot be answered by a keystroke buffered before the process was stopped.
+
+### Sensitive prompts do not run through the TUI input path
+
+The full-screen renderer is three platform-specific input and drawing implementations, and
+its untested long tail — resize races, bracketed paste, mouse reporting, IME composition,
+alternate screen modes — is precisely where a confirmation could be satisfied by bytes the
+operator never deliberately typed.
+
+So destructive confirmations do not use it. Entering a confirmation drops to a **minimal
+line reader**: mouse reporting and bracketed paste are disabled for the duration, input is
+parsed byte-by-byte, and any escape sequence, control byte, or synthetic-looking input is
+rejected outright rather than interpreted. Auto-repeat is defeated by requiring the typed
+serial suffix, which repeat cannot produce. The confirmation path is small enough to test
+exhaustively, and it is identical on all three platforms.
+
+### Terminal capability is probed, not inferred
+
+Checking `isatty` and `TERM` passes on serial gateways, IPMI redirects, and managed console
+appliances that then fail to handle raw sequences reliably — desynchronising the display
+without visibly breaking it, which is the worst failure shape for a tool about to destroy a
+disk. The tool sends a cursor-position query and requires a well-formed response within a
+timeout before committing to full-screen. No response, malformed response, or timeout falls
+back to the numbered menu.
 
 ### The TUI does not weaken any safety control
 
@@ -249,6 +283,37 @@ a comprehensible message rather than an opaque `EBUSY`. Windows uses the existin
 `FSCTL_LOCK_VOLUME` acquisition; macOS uses `diskutil unmountDisk` plus an exclusive open.
 
 The lock is held for the entire operation and released on exit, including on signal.
+
+### The device is re-verified continuously, not just at the start
+
+A device can vanish or change underneath a running operation: a bus reset, an enclosure
+dropping and re-enumerating, a USB bridge power-cycling, a SAS expander glitch. When it comes
+back it may be a *different* device at the same path, or the same device with different
+geometry. A run that validated identity once at startup and then wrote for four hours has no
+idea any of this happened, and on Linux the kernel will happily let it keep writing to a
+re-enumerated `/dev/sdb`.
+
+Every read and write chunk therefore revalidates cheap identity invariants — the device
+fingerprint, reported size, and logical sector size — against what was confirmed at
+preflight. Any mismatch is an **immediate hard stop**, not a retry: the operation aborts, the
+lock releases, and the run is recorded as `INTERRUPTED` with the offset reached. Resuming
+requires re-confirming identity from scratch.
+
+This applies to both endpoints of a `clone`. Losing the source mid-clone is a bad day; losing
+the target and continuing to write into whatever replaced it is a catastrophe.
+
+### The ledger has exactly one writer at a time
+
+The ledger is a hash chain, which means two processes appending concurrently do not merely
+interleave records — they compute their entries against the same predecessor hash and produce
+a chain that fails its own verification. Two long operations on one bench, which the device
+locking explicitly permits since they target different devices, would break the integrity
+mechanism precisely when it is being used most.
+
+Appends take a host-wide exclusive lock (`flock`, `LockFileEx` on Windows) for the duration
+of read-head, compute, append, and `fsync`. Writes are atomic and the lock is held across the
+whole sequence rather than just the write. `doc ledger --verify` additionally detects and
+reports a broken chain rather than failing opaquely.
 
 ### Interruption and crash lifecycle
 
@@ -499,11 +564,33 @@ usually does not find out until later.
   typed serial suffix. There is no single confirmation covering both.
 - **The target's card is rendered in the danger style and labelled `WILL BE DESTROYED`.** No
   screen ever shows both devices without saying which one dies.
-- **Inversion heuristics run before anything is written.** If the target holds a valid
-  partition table with recognisable filesystems and the source does not, or the target is
-  substantially fuller than the source, or the source is blank, the tool stops and says
-  plainly: *this looks like source and target are reversed.* Overriding requires re-typing
-  both serials in the correct roles. Most real inversions are caught by exactly this check.
+- **The primary control is describing what the target contains, in words.** Heuristics only
+  catch asymmetric cases; two populated drives of similar size — an ordinary migration —
+  trip none of them, and that is exactly when an operator is most likely to transpose two
+  arguments. No content comparison can decide which of two data-bearing drives *should* be
+  the source, so the tool stops trying to infer intent and instead makes the consequence
+  impossible to miss:
+
+      TARGET — WILL BE DESTROYED
+        Samsung 870 EVO  1.0 TB  #S5Y2NJ0T304891
+        GPT, 3 partitions
+        NTFS "Client-Data"   847 GB used of 931 GB
+        last written 2026-08-09
+        type S5Y2NJ0T304891 to destroy this:
+
+  An operator who has transposed their arguments reads a description of the drive they meant
+  to keep. That catches the symmetric case, which no heuristic does.
+- **Asymmetric heuristics still run**, as a second net: target holds a valid table with
+  recognisable filesystems and the source does not, or the target is substantially fuller
+  than the source. These stop and name the suspicion.
+- **A blank source is an acknowledgement, not a hard block.** Blank-to-blank staging is
+  legitimate bench work, and a hard stop there teaches operators to override reflexively —
+  which destroys the control for the cases that matter.
+- **Prior-clone detection.** On completion the tool writes a clone record to the ledger and
+  a small marker to the target, carrying the source identity, extent map checksums, and a
+  clone UUID. Re-running against a target that already holds a marker is recognised as a
+  resume or a re-clone rather than looking like an ordinary populated drive, so a partially
+  completed clone cannot silently masquerade as a finished one.
 - **Order is fixed and explicit.** `clone <source> <target>` — never inferred from device
   order, size, or which one was selected first.
 - Both devices take the exclusive lock, not just the target.
@@ -518,19 +605,41 @@ usually does not find out until later.
 - **Target larger:** fine. Trailing space is left unallocated, and the tool reports how much
   rather than silently leaving it. Expanding the last partition is filesystem work and is
   not done here.
-- **Sector size mismatch:** a 512-byte-sector source cloned to a 4Kn target produces a disk
-  that is misaligned and frequently unbootable. Detected before starting and refused unless
-  explicitly overridden, because the failure appears much later and looks like something else
-  entirely.
-- **GPT disk GUID collision:** a byte-exact clone carries the source's GPT disk GUID and
-  partition GUIDs. With both drives attached to one machine — the normal state during a
-  migration — Windows and several Linux boot paths behave unpredictably about which one they
-  mount. After a successful clone the tool offers to regenerate the target's disk GUID and
-  partition GUIDs, and explains why. Most cloning tools get this wrong and the resulting
-  bug is miserable to diagnose.
-- The GPT backup header is relocated to the end of the *target*, since a larger target
-  otherwise carries a backup header stranded in the middle of the disk where nothing will
-  find it.
+- **Sector size and alignment:** a 512-byte-sector source cloned to a 4Kn target produces a
+  misaligned and frequently unbootable disk, and the failure surfaces much later looking
+  like something unrelated. Rather than a binary refuse-or-override — which trains operators
+  to override — the tool evaluates logical size, physical size, alignment offset, and each
+  partition's start against the target's geometry, and reports which of the three outcomes
+  applies: clean, viable but misaligned with the specific partitions named, or impossible.
+  Only the last is refused.
+- **GPT identifier collision, handled carefully because the obvious fix breaks systems.**
+  A byte-exact clone carries the source's GPT disk GUID *and* every partition GUID. With
+  both drives attached during a migration — the normal state — the duplicate **disk** GUID
+  makes Windows and several Linux boot paths unpredictable about which they mount.
+
+  An earlier draft offered to regenerate both. That was wrong and would have broken working
+  systems: **partition GUIDs are referenced by things that must keep resolving.** `fstab`
+  and `crypttab` entries keyed on `PARTUUID=`, systemd-boot and GRUB entries, BitLocker
+  metadata, and Windows BCD all point at partition identifiers. Rewriting them produces a
+  clone that appears successful and then fails to boot, with a cause that looks like
+  something else entirely.
+
+  The default is therefore a **byte-exact clone that preserves all identifiers.** Duplicate
+  disk GUID is reported as a warning with the correct remedy stated: do not leave both
+  drives attached. Regenerating the **disk GUID only** — which nothing in a normal boot
+  configuration references — is offered as an explicit opt-in for operators who must run
+  both. Regenerating partition GUIDs is available only behind a separate flag that names
+  what it will break, and is never suggested by the tool.
+- **The source GPT is validated before anything is relocated.** Relocating a backup header
+  is only correct if the table being propagated is the live one. A stale backup, or a
+  primary and backup that disagree, produces a structurally valid table pointing at the
+  wrong places — which is worse than an obviously broken one, because tools will trust it.
+  Before writeback the tool checks CRCs on both headers and the entry array, checks the
+  usable-range and partition bounds for self-consistency, and corroborates partition starts
+  against filesystem signatures actually found on the media. Disagreement means the tool
+  reports and refuses rather than picking one.
+- On a larger target the backup header is relocated to the end of the target, since it would
+  otherwise sit stranded mid-disk where nothing will look for it.
 
 ### Reading only what is used
 
@@ -604,6 +713,41 @@ device, but it writes large files and is enabled only with `--allow-image`.
 The server is also read-only about the ledger: it can validate and read the chain, never
 append to it.
 
+## Delivery order, and what is deliberately deferred
+
+The full surface described here — TUI with fallback, three OS backends, SMART across three
+transports, error-tolerant imaging, clone, restore, sanitization with hardware commands,
+partition recovery, carving, filesystem-aware undelete, an MCP server, a fleet check, and a
+hash-chained ledger — is not deliverable at production quality in one pass by one developer.
+Attempting it produces the specific outcome this project is built to avoid: features that
+half-work and report success.
+
+Two subsystems are the likeliest casualties and are explicitly deferred rather than
+attempted early:
+
+- **Filesystem-aware undelete.** The highest false-confidence risk in the whole tool. A
+  half-finished NTFS parser emits files that open and contain the wrong bytes, which is worse
+  than emitting nothing. It ships only when its capability tiers are enforced and tested.
+- **The MCP server and the RMM JSON contract.** These are external integration surfaces.
+  Publishing them before the core storage operations are stable means other systems take
+  dependencies on a schema and a tool inventory that are still moving.
+
+**Order:**
+
+1. `identify`, `topology`, `probe` — pure functions over captured fixtures. Everything is
+   downstream of these being right, and a bug here destroys a production disk.
+2. `inspect` and the SMART layer, CLI only. First useful output.
+3. `wipe` and the ledger. The core value, on top of proven targeting.
+4. The TUI, over commands that already work.
+5. `image`, then `clone` and `restore` — sharing the error-tolerant read engine.
+6. `recover parts`, then `carve`. Highest recovery value per unit of effort.
+7. External tool wrapping for `testdisk` and `photorec`.
+8. The RMM JSON contract and the MCP server, once the schema has stopped moving.
+9. `recover undelete`, NTFS first since it is nearly all client data here.
+10. `clone --used-only`, which depends on the parsers from step 9 and is gated on an explicit
+    parser-version check. Until then clone is always full-surface — a "used-only" clone that
+    silently skips blocks it failed to understand is a corrupt clone.
+
 ## Testing
 
 - `identify` and `topology` are pure functions over captured fixtures — recorded `/sys`
@@ -617,7 +761,29 @@ append to it.
 - `execute` and `image` run against loopback and sparse-file devices, and a scratch USB
   stick. Never against real disks in CI.
 - A refusal suite asserts non-zero exit for every topology refusal case.
-- An MCP suite asserts `wipe` is absent from the advertised tool list.
+- An MCP suite asserts `wipe`, `restore`, and `clone` are absent from the advertised tool list.
+- The confirmation reader is fuzzed with escape sequences, bracketed-paste payloads, mouse
+  reporting bytes, and auto-repeat streams, asserting none of them can satisfy a prompt.
+
+### Hardware fault injection, before any of this is called ready
+
+The catastrophic paths cannot be validated against fixtures alone, and shipping them on unit
+tests would be the same overconfidence this design keeps correcting. A sacrificial-drive
+matrix runs on real hardware before any destructive feature is marked ready:
+
+- **Clone inversion** — deliberately transposed arguments on two populated drives of similar
+  size, asserting the target-contents description makes the mistake visible.
+- **Hotplug drop** — physically pulling the source, and separately the target, mid-clone and
+  mid-wipe, asserting the per-chunk identity check hard-stops rather than continuing.
+- **Re-enumeration under the same path** — pulling one device and attaching a different one at
+  the same `/dev` node during an operation.
+- **Mixed sector size** — 512e and 4Kn drives in every source/target combination.
+- **Malformed and stale GPT** — including a backup header describing a previous layout, which
+  must be detected as stale rather than restored.
+- **Concurrent runs** — two operations against different devices on one host, asserting the
+  ledger chain survives and verifies.
+- **Power interruption** — cutting power mid-wipe and mid-clone, asserting the next run
+  detects the unclosed record and refuses to certify.
 
 ## Out of scope
 

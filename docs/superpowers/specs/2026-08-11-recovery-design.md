@@ -76,8 +76,11 @@ If a live run starts throwing IO errors that were not present at enumeration, th
 degrading under the workload right now and continuing is the damage. The run halts, reports
 what was recovered so far, and offers to switch to `doc image` — which is built for exactly
 this and reads in an order designed to capture the most data before a dying drive gives up.
-Accepting hands off to the imager with the already-read regions marked complete rather than
-starting over.
+Handing off carries forward **only regions whose contents were checksummed and verified at
+read time**. Everything else is re-read. Marking unverified reads from a drive that was
+visibly degrading as complete would bake the least trustworthy data into the image and call
+it done — reads taken from failing media in the minutes before it faulted are exactly the
+ones most likely to be wrong.
 
 ## `doc image` on a failing drive
 
@@ -98,6 +101,14 @@ still there; the table describing it is gone.
 - Parse the existing MBR and GPT, including the GPT backup header at the end of the device,
   which frequently survives when the primary is destroyed. A great many "unallocated" drives
   are repaired by restoring the primary from the backup and nothing else.
+- **The backup is never trusted just because it parses.** A backup header can be stale,
+  describing a layout from before the disk was repartitioned, and restoring it yields a table
+  that validates cleanly and points at the wrong places — worse than an obviously broken one,
+  because every tool downstream will believe it. Before proposing a restore the tool verifies
+  header and entry-array CRCs, checks usable-range and partition-bound self-consistency, and
+  **corroborates each partition start against a filesystem signature actually present at that
+  offset on the media**. A backup that describes partitions where no filesystem begins is
+  reported as stale and is not offered as a repair.
 - When both are gone, scan the full surface for filesystem superblocks and boot signatures —
   NTFS `$Boot`, ext2/3/4 superblocks at the standard offsets and their backups, FAT boot
   sectors, APFS and HFS+ headers, exFAT — and reconstruct a plausible table from what is
@@ -119,6 +130,13 @@ parse, and from unallocated space where the directory entry is long gone.
 - Ships with signatures for the formats that matter in an MSP context: JPEG, PNG, GIF, TIFF,
   HEIC, PDF, ZIP and the OOXML family that rides on it (`.docx`, `.xlsx`, `.pptx`), legacy
   OLE2 Office, MP4/MOV, SQLite, PST/OST, and common archive formats.
+- **A signature match alone never produces an artifact.** Header bytes collide constantly
+  inside compressed, encrypted, and already-carved data, and a carver that trusts headers
+  emits a directory full of unopenable files that a client will treat as recovered data.
+  Every candidate must additionally pass structural validation appropriate to its format —
+  a matching footer, an internal length field that lands where it should, a CRC that
+  verifies, a parseable container header — before it is written. Candidates that match a
+  header and fail validation are counted in the manifest but not emitted.
 - Fragmented files are the known limit of all carving and the docs say so plainly. A carver
   recovers contiguous runs; a file scattered across the disk comes back truncated or not at
   all. Overstating this is how a client is told their data is safe when it is not.
@@ -132,16 +150,40 @@ Higher-value output than carving, because files come back with their **original 
 paths, timestamps, and sizes**, and because the filesystem's own records identify extents
 so fragmented files can be reassembled correctly.
 
-- **NTFS:** parse `$MFT`, walk records with the in-use flag clear, resolve data runs and
-  reassemble from them. Handles resident (small) files stored inline in the MFT record, and
-  reads `$MFT` fragmentation via `$MFT`'s own attribute list. `$LogFile` and `$UsnJrnl` are
-  read where present for recently-deleted entries the MFT has already reused.
-- **ext2/3/4:** parse superblock and group descriptors, walk inode tables for inodes with
-  a zeroed link count, and follow extent trees (ext4) or indirect block chains (ext2/3).
-  ext4 zeroes extent info on delete more aggressively than ext3 did, so expected yield is
-  lower and the tool reports that rather than implying parity.
-- **FAT12/16/32 and exFAT:** directory entries marked deleted retain the full name minus its
-  first character and the starting cluster; walk the FAT chain where it survives.
+### Supported cases are declared, and unsupported ones are refused rather than approximated
+
+The failure mode that matters here is the same one the rest of this project keeps correcting:
+emitting output that looks successful and is wrong. A file recovered with the wrong bytes,
+handed to a client as their recovered document, is worse than reporting that it could not be
+recovered — they will find out later, having already deleted the source.
+
+So each parser declares a **capability tier**, and anything outside it is reported as
+`UNSUPPORTED` with the reason, never reconstructed on a best guess.
+
+- **NTFS.** Tier one is non-resident, uncompressed, unencrypted files whose data runs
+  resolve completely within the base MFT record — plus resident files stored inline, which
+  are trivially correct. Everything else is named and refused rather than approximated:
+  attribute lists spanning multiple records, sparse and compressed attributes with their own
+  run encoding, encrypted files, alternate data streams, and transactionally-deleted files
+  whose state lives in `$LogFile`. `$MFT`'s own fragmentation is resolved via its attribute
+  list because without it the parser silently reads the wrong records. `$LogFile` and
+  `$UsnJrnl` are read where present to *name* recently-deleted entries the MFT has already
+  reused, which is useful even when the content is gone.
+- **ext2/3/4.** Tier one is inodes with a zeroed link count whose extent tree or indirect
+  chain resolves completely and whose metadata checksums validate. ext4 zeroes extent info
+  on delete far more aggressively than ext3 did, so the honest expectation is not merely
+  *lower yield* but that a partially-zeroed extent tree can resolve to blocks that now belong
+  to something else — plausible-looking output that is wrong. Checksum validation failure,
+  inline-to-extent transitions, delayed allocation, and encrypted inodes all return
+  `UNSUPPORTED` rather than content.
+- **FAT12/16/32 and exFAT.** Deleted directory entries retain the name minus its first
+  character and the starting cluster. The FAT chain for a deleted file is typically already
+  freed, so only contiguous runs are recoverable with confidence; non-contiguous files are
+  reported as name-known, content-unrecoverable.
+
+Every emitted artifact carries the tier and the validation that passed, so a manifest
+distinguishes "byte-exact and verified" from "recovered, unverified" without the operator
+having to know NTFS internals.
 
 Each filesystem parser is a self-contained module reading from a byte-range interface, so it
 is tested against small crafted images committed to the repo rather than against hardware.

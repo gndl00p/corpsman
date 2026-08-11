@@ -80,22 +80,41 @@ drive destroys one thing. Cloning backwards destroys the client's data *and* con
 copy that would have restored it, in a single operation, and you usually don't find out
 until later.
 
-- Source and target are confirmed **separately**, each with its own identity card and typed
-  serial suffix. No single confirmation covers both.
-- The target's card renders in the danger style, labelled `WILL BE DESTROYED`. No screen
-  shows both devices without saying which one dies.
-- **Inversion heuristics run before any write.** Target holds a valid partition table with
-  recognisable filesystems and the source doesn't? Target substantially fuller than source?
-  Source blank? It stops and says *this looks reversed*. Overriding means re-typing both
-  serials in their correct roles.
-- Direction is positional and never inferred from size, device order, or selection order.
+The primary control isn't a heuristic — it's **describing what the target holds, in words**.
+Heuristics only catch asymmetric cases, and two populated drives of similar size trip none of
+them, which is exactly the ordinary migration where arguments get transposed:
+
+```
+TARGET — WILL BE DESTROYED
+  Samsung 870 EVO  1.0 TB  #S5Y2NJ0T304891
+  GPT, 3 partitions
+  NTFS "Client-Data"   847 GB used of 931 GB
+  last written 2026-08-09
+  type S5Y2NJ0T304891 to destroy this:
+```
+
+Transpose your arguments and you're reading a description of the drive you meant to keep. No
+content comparison can decide which of two data-bearing drives *should* be the source, so the
+tool stops guessing intent and makes the consequence impossible to miss.
+
+- Source and target are confirmed **separately**, each with its own card and typed serial.
+- Asymmetric heuristics still run as a second net — target has a table the source lacks,
+  target substantially fuller.
+- A blank source is an acknowledgement, not a block. Blank-to-blank staging is real work, and
+  a hard stop there teaches reflexive overriding, which kills the control where it matters.
+- Direction is positional, never inferred from size or selection order.
+- A clone marker on the target means a partial prior clone can't masquerade as a finished one.
 
 **Why clones fail to boot**, all handled:
 
-- **GPT disk GUID collision** — a byte-exact clone carries the source's disk and partition
-  GUIDs, and with both drives attached during a migration, Windows and several Linux boot
-  paths get unpredictable about which they mount. It offers to regenerate the target's GUIDs
-  and explains why. Most cloning tools get this wrong and the resulting bug is miserable.
+- **GPT identifier collision** — a byte-exact clone carries the source's disk GUID *and*
+  every partition GUID, and with both drives attached the duplicate **disk** GUID makes
+  Windows and several Linux boot paths unpredictable about which they mount. The obvious fix
+  is worse than the problem: **partition** GUIDs are what `fstab` and `crypttab` `PARTUUID=`
+  entries, systemd-boot, GRUB, BitLocker, and Windows BCD resolve against, so regenerating
+  them yields a clone that looks fine and won't boot. Default is byte-exact, preserving
+  everything. Regenerating the disk GUID alone is opt-in; regenerating partition GUIDs needs
+  a separate flag that names what it breaks, and is never suggested.
 - **Sector size mismatch** — 512e source onto a 4Kn target is misaligned and usually
   unbootable. Refused before starting, because the symptom shows up much later looking like
   something else.
