@@ -1716,6 +1716,25 @@ def test_reported_uncorrect_is_scratch_only():
     assert assess(sd(**{187: 12})).health == HEALTH_SCRATCH_ONLY
 
 
+def test_command_timeout_is_informational_and_never_scores():
+    # 188 packs three 16-bit sub-counters into a 48-bit raw on many vendors,
+    # so a benign drive can report millions. Scoring it would bin healthy
+    # inventory. It must appear in the reasons but not move the verdict.
+    v = assess(sd(**{188: 4295032833}))
+    assert v.health == HEALTH_REUSE
+    assert any("188" in r for r in v.reasons)
+
+
+def test_unreported_self_assessment_is_not_a_failure():
+    # overall_passed is tri-state. None means the drive reported no
+    # self-assessment, which is common on SAS and is neither pass nor fail.
+    # Collapsing it to False would condemn a drive for a reason unrelated to
+    # its health.
+    s = sd()
+    s.overall_passed = None
+    assert assess(s).health == HEALTH_REUSE
+
+
 def test_reasons_name_the_attributes_that_fired():
     v = assess(sd(**{5: 128}))
     assert any("5" in r for r in v.reasons)
@@ -1762,7 +1781,17 @@ THRESHOLDS = {
 }
 
 # Above zero but below THRESHOLDS puts the drive in SCRATCH_ONLY.
-_WATCH = (5, 187, 188, 197, 198)
+#
+# 188 is deliberately absent. Many vendors pack three 16-bit sub-counters
+# into its 48-bit raw field, so raw.value is a composite number rather than
+# a count of timeouts -- a drive with a single benign event can report a
+# value in the millions. Thresholding it like 5/197/198 would condemn
+# healthy drives, so it is reported informationally and never moves the
+# verdict. See _INFORMATIONAL below.
+_WATCH = (5, 187, 197, 198)
+
+# Carried in the report for the operator to see, but never scored.
+_INFORMATIONAL = (188,)
 
 _NAMES = {
     5: "Reallocated_Sector_Ct",
@@ -1796,6 +1825,14 @@ def assess(smart, prior=None):
 
     reasons = []
     cabling = None
+
+    for aid in _INFORMATIONAL:
+        value = smart.attrs.get(aid, 0)
+        if value:
+            reasons.append(
+                "%s (informational: vendor-packed composite, not a count)"
+                % _label(aid, value)
+            )
 
     crc = smart.attrs.get(199, 0)
     if crc:
