@@ -50,3 +50,27 @@ def test_unknown_tool_is_false_not_an_error():
 def test_tools_tuple_is_stable():
     assert "smartctl" in TOOLS
     assert "nvme" in TOOLS
+
+
+def test_present_tool_with_nonzero_exit_is_still_present():
+    # Real hdparm answers --version with rc=22 "unknown flag" while very
+    # much existing. has() must key off `found` (did the exec succeed),
+    # never `rc` (what the tool thought of our arguments).
+    def weird(argv, timeout=60):
+        return RunResult(rc=22, out="", err="version: unknown flag",
+                         found=True)
+    assert Probe(runner=weird).has("hdparm") is True
+
+
+def test_absent_tool_with_zero_exit_is_still_absent():
+    # The mirror case: found=False must win even if rc looks successful.
+    def impossible(argv, timeout=60):
+        return RunResult(rc=0, out="", err="", found=False)
+    assert Probe(runner=impossible).has("smartctl") is False
+
+
+def test_timed_out_probe_counts_as_unusable():
+    def hangs(argv, timeout=60):
+        return RunResult(rc=124, out="", err="timeout", found=True,
+                         timed_out=True)
+    assert Probe(runner=hangs).has("smartctl") is False

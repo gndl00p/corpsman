@@ -28,7 +28,11 @@ class Probe(object):
             # 'command -v' is not available as an executable; probe the
             # binary itself with a harmless argument instead.
             result = self._runner([name, "--version"], timeout=10)
-            self._cache[name] = result.found
+            # `has()` means usable, not merely present. A tool that cannot
+            # answer --version within the timeout will not answer during a
+            # real operation either -- it would just hang somewhere less
+            # recoverable. This is a deliberate stance, not an oversight.
+            self._cache[name] = result.found and not result.timed_out
         return self._cache[name]
 
     def missing(self):

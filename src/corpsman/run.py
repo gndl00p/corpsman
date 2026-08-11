@@ -9,6 +9,7 @@ class RunResult(NamedTuple):
     out: str
     err: str
     found: bool
+    timed_out: bool = False
 
 
 def run(argv, timeout=60):
@@ -37,5 +38,6 @@ def run(argv, timeout=60):
     except subprocess.TimeoutExpired:
         p.kill()
         out, err = p.communicate()
-        return RunResult(rc=124, out=out or "", err="timeout", found=True)
+        return RunResult(rc=124, out=out or "", err="timeout", found=True,
+                          timed_out=True)
     return RunResult(rc=p.returncode, out=out or "", err=err or "", found=True)
