@@ -9,6 +9,10 @@ venv/
 dist/
 build/
 
+# single-file build artifact -- run `python3 build.py` to produce it,
+# never commit it
+/doc
+
 # never commit run artifacts or operator state
 ledger.jsonl
 zeroize-*.txt
