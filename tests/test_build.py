@@ -177,6 +177,37 @@ def test_built_file_imports_only_stdlib():
     assert offenders == [], "third-party imports found in built file: %r" % offenders
 
 
+def test_build_fails_loudly_if_a_source_module_is_missing_from_the_list():
+    """build.py's MODULES list is the one thing that needs manual upkeep
+    when a file is added to src/corpsman/ -- there is no shim or regex step
+    left to silently paper over a miss. A module missing from MODULES is
+    invisible to the built `doc`: it produces a file that imports cleanly
+    and then fails on a real device list the first time something reaches
+    for the missing name, which is exactly the failure mode this build
+    exists to avoid.
+
+    This proves that drift is caught at test time -- the moment someone
+    adds a file and forgets to list it -- rather than whenever the missing
+    module first gets exercised at runtime. It compares MODULES against an
+    actual os.walk() of src/corpsman/, not against a second hardcoded list,
+    so it can't drift out of sync with reality the same way MODULES itself
+    could.
+    """
+    actual = set()
+    for dirpath, _dirs, files in os.walk(build.SRC):
+        for name in files:
+            if name.endswith(".py"):
+                actual.add(os.path.relpath(os.path.join(dirpath, name), build.SRC))
+
+    listed = set(relpath for _name, relpath in build.MODULES)
+
+    assert listed == actual, (
+        "build.py's MODULES list has drifted from src/corpsman/: "
+        "missing from MODULES=%r, listed but no longer on disk=%r"
+        % (actual - listed, listed - actual)
+    )
+
+
 def test_built_file_matches_source_package_report():
     """The built file must actually WORK, not merely parse and import.
 
