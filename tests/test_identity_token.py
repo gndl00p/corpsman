@@ -39,3 +39,27 @@ def test_blank_serials_do_not_collide_when_instance_path_differs():
 def test_device_path_alone_does_not_change_token():
     # /dev/sdb -> /dev/sdc across a replug is not a different device.
     assert mkdev(path="/dev/sdb", name="sdb").identity_token == mkdev(path="/dev/sdc", name="sdc").identity_token
+
+
+def test_serial_change_changes_token():
+    assert mkdev().identity_token != mkdev(serial="DIFFERENT").identity_token
+
+
+def test_model_change_changes_token():
+    assert mkdev().identity_token != mkdev(model="Other Model").identity_token
+
+
+def test_wwn_change_changes_token():
+    assert mkdev().identity_token != mkdev(wwn="0xdeadbeef").identity_token
+
+
+def test_bus_change_changes_token():
+    assert mkdev().identity_token != mkdev(bus="usb").identity_token
+
+
+def test_separator_injection_cannot_forge_another_devices_token():
+    # A field is firmware-controlled and may contain any bytes. Two
+    # distinct field tuples must never produce the same token.
+    a = mkdev(model="A", serial="B")
+    b = mkdev(model="A\x1fB", serial="")
+    assert a.identity_token != b.identity_token

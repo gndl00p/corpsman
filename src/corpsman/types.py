@@ -53,7 +53,12 @@ class Device(object):
             self.serial or "",
             self.bus or "",
         ]
-        blob = "\x1f".join(parts).encode("utf-8")
+        # Length-prefix each field rather than relying on a separator being
+        # absent from the data. Fields such as model/serial are firmware-
+        # controlled USB string descriptors and may contain arbitrary bytes,
+        # so a plain separator join could let one field's content shift a
+        # boundary and collide with a different field tuple.
+        blob = "".join("%d:%s" % (len(p), p) for p in parts).encode("utf-8")
         return hashlib.sha256(blob).hexdigest()[:_TOKEN_LEN]
 
     def __repr__(self):
