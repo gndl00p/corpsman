@@ -12,7 +12,7 @@ TOOLS = (
     "hdparm",
     "sg_sanitize",
     "sedutil-cli",
-    "blkdiscard",
+    "blkdiscard",  # corpsman: allow-write-flag -- probed for --version only, never invoked to write
     "ddrescue",
 )
 
