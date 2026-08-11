@@ -58,13 +58,25 @@ addressing. Picking from a list showing model, serial, size, health, and a red
 `[ROOT FS]` marker is strictly safer.
 
 Hand-rolled ANSI/VT rather than `curses`, which is stdlib on Unix but absent on Windows —
-`ctypes` flips on `ENABLE_VIRTUAL_TERMINAL_PROCESSING` there. Serial consoles, IPMI text
-redirects, recovery shells, and dumb terminals **fall back to a numbered menu** with no
-raw mode and no escape sequences. On a bench those aren't hypothetical.
+`ctypes` flips on `ENABLE_VIRTUAL_TERMINAL_PROCESSING` there. Capability is **actively
+probed** with a cursor-position query rather than inferred from `TERM`, because serial
+gateways and IPMI redirects pass an `isatty` check and then desync the display without
+visibly breaking it. No response, malformed response, or timeout falls back to a numbered
+menu with no raw mode and no escape sequences.
+
+**Destructive confirmations bypass the TUI input path entirely.** The full-screen renderer is
+three platform-specific implementations whose untested long tail — resize races, bracketed
+paste, mouse reporting, IME — is exactly where a prompt could be satisfied by bytes nobody
+typed. Confirmations drop to a minimal byte-level reader that rejects escape sequences and
+control bytes outright, with mouse reporting and paste disabled for the duration. Auto-repeat
+can't produce a serial suffix.
 
 System-state ancestors render locked and aren't selectable for destructive actions at all —
 the refusal isn't a dialog you can click past. Arming still needs the held chord, and the
-mode banner is always in the header.
+mode banner is always in the header. Terminal restoration is wired to `atexit`, an
+exception hook, and `SIGINT`/`SIGTERM`/`SIGHUP`/`SIGTSTP`/`SIGCONT` — but **not**
+unconditional, since `SIGKILL` and a power cut can't be handled by the process being killed.
+`doc reset-term` exists for that, and so does `stty sane`.
 
 ## Cloning
 
@@ -115,9 +127,12 @@ tool stops guessing intent and makes the consequence impossible to miss.
   them yields a clone that looks fine and won't boot. Default is byte-exact, preserving
   everything. Regenerating the disk GUID alone is opt-in; regenerating partition GUIDs needs
   a separate flag that names what it breaks, and is never suggested.
-- **Sector size mismatch** — 512e source onto a 4Kn target is misaligned and usually
-  unbootable. Refused before starting, because the symptom shows up much later looking like
-  something else.
+- **Sector size and alignment** — 512e source onto a 4Kn target is misaligned and usually
+  unbootable, and the symptom surfaces much later looking unrelated. Rather than a binary
+  refuse-or-override, which just trains people to override, it evaluates logical size,
+  physical size, alignment offset, and each partition start against the target and reports
+  clean, viable-but-misaligned with the partitions named, or impossible. Only the last is
+  refused.
 - **Stranded backup GPT** — relocated to the end of the target, not left mid-disk on a larger
   drive where nothing will find it.
 - Target smaller than source is refused; making it fit means shrinking filesystems, which is
