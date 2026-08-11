@@ -21,3 +21,11 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+# tests/fixtures/linux/luks-lvm intentionally contains a reciprocal
+# holders/slaves directory symlink pair (dm-0 <-> dm-1), mirroring real
+# sysfs topology. pytest's own directory-discovery walk follows symlinks
+# and will spin forever on that cycle if it is allowed to recurse into
+# the fixtures tree looking for test_*.py files, so it must be pruned
+# from collection explicitly -- the cycle itself must stay intact, since
+# Task 6's resolver is tested against it walking both directions.
+norecursedirs = ["*.egg", ".*", "build", "dist", "CVS", "_darcs", "{arch}", "venv", "node_modules", "fixtures"]

@@ -135,11 +135,111 @@ def usb_stick(root):
     w(root + "/proc/swaps", "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n")
 
 
+SDA = ("/sys/devices/pci0000:00/0000:00:17.0/ata1/host0/target0:0:0/"
+       "0:0:0:0/block/sda")
+SDB = ("/sys/devices/pci0000:00/0000:00:17.0/ata2/host1/target1:0:0/"
+       "1:0:0:0/block/sdb")
+DM0 = "/sys/devices/virtual/block/dm-0"
+DM1 = "/sys/devices/virtual/block/dm-1"
+
+
+def rel_symlink(root, target_abs, link_abs):
+    """Symlink link_abs -> target_abs using a correct relative path.
+
+    Computing the relative path rather than hand-writing ../.. chains is
+    how the fixture avoids the dangling links the first version shipped.
+    """
+    link_full = root + link_abs
+    d = os.path.dirname(link_full)
+    if not os.path.isdir(d):
+        os.makedirs(d)
+    rel = os.path.relpath(root + target_abs, d)
+    if os.path.islink(link_full) or os.path.exists(link_full):
+        os.remove(link_full)
+    os.symlink(rel, link_full)
+
+
+def luks_lvm(root):
+    """/ lives on vg-root -> dm-1 (LVM) -> dm-0 (LUKS) -> sda2 -> sda.
+
+    A naive check that only compares the target against the device backing
+    '/' never looks at sda, so an operator selecting /dev/sda destroys a
+    live host. This fixture exists to make that failure impossible to ship.
+    """
+    # Physical disk. Model is the 16-byte SCSI product ID, space padded.
+    w(root + SDA + "/size", "1953525168")
+    w(root + SDA + "/removable", "0")
+    w(root + SDA + "/queue/rotational", "1")
+    w(root + SDA + "/queue/logical_block_size", "512")
+    w(root + SDA + "/queue/physical_block_size", "4096")
+    w(root + SDA + "/device/model", "WDC WD10EZEX-0")
+    w(root + SDA + "/device/vendor", "ATA     ")
+    w(root + SDA + "/sda1/partition", "1")
+    w(root + SDA + "/sda1/size", "1048576")
+    w(root + SDA + "/sda2/partition", "2")
+    w(root + SDA + "/sda2/size", "1952476592")
+    # A second, unrelated disk that must NOT be flagged.
+    w(root + SDB + "/size", "7814037168")
+    w(root + SDB + "/removable", "0")
+    w(root + SDB + "/queue/rotational", "1")
+    w(root + SDB + "/queue/logical_block_size", "512")
+    w(root + SDB + "/queue/physical_block_size", "4096")
+    w(root + SDB + "/device/model", "WDC WD40EFRX-6")
+    w(root + SDB + "/device/vendor", "ATA     ")
+    # dm-0 = LUKS on sda2
+    w(root + DM0 + "/size", "1952474544")
+    w(root + DM0 + "/removable", "0")
+    w(root + DM0 + "/queue/rotational", "1")
+    w(root + DM0 + "/queue/logical_block_size", "512")
+    w(root + DM0 + "/queue/physical_block_size", "512")
+    w(root + DM0 + "/dm/name", "luks-9f3c")
+    # dm-1 = LVM logical volume on dm-0
+    w(root + DM1 + "/size", "1900000000")
+    w(root + DM1 + "/removable", "0")
+    w(root + DM1 + "/queue/rotational", "1")
+    w(root + DM1 + "/queue/logical_block_size", "512")
+    w(root + DM1 + "/queue/physical_block_size", "512")
+    w(root + DM1 + "/dm/name", "vg-root")
+
+    # /sys/block/<dev> symlinks into the devices tree, as the kernel does.
+    rel_symlink(root, SDA, "/sys/block/sda")
+    rel_symlink(root, SDB, "/sys/block/sdb")
+    rel_symlink(root, DM0, "/sys/block/dm-0")
+    rel_symlink(root, DM1, "/sys/block/dm-1")
+
+    # The holder/slave edges. These are symlinks on a real kernel, and they
+    # are the transitive chain the topology layer walks:
+    #   dm-1 (vg-root) -> dm-0 (luks) -> sda2 -> sda
+    rel_symlink(root, DM0, SDA + "/sda2/holders/dm-0")
+    rel_symlink(root, SDA + "/sda2", DM0 + "/slaves/sda2")
+    rel_symlink(root, DM1, DM0 + "/holders/dm-1")
+    rel_symlink(root, DM0, DM1 + "/slaves/dm-0")
+
+    # major:minor resolution, resolving to the same dirs as /sys/block.
+    rel_symlink(root, SDA, "/sys/dev/block/8:0")
+    rel_symlink(root, SDB, "/sys/dev/block/8:16")
+    rel_symlink(root, DM0, "/sys/dev/block/253:0")
+    rel_symlink(root, DM1, "/sys/dev/block/253:1")
+
+    # Device nodes so nothing dangles.
+    for node in ("sda", "sda1", "sda2", "sdb", "dm-0", "dm-1"):
+        w(root + "/dev/" + node, "")
+    # / is dm-1 (253:1). /boot is sda1 (8:1). Swap is on dm-0.
+    w(root + "/proc/self/mountinfo",
+      "25 1 253:1 / / rw,relatime shared:1 - ext4 /dev/mapper/vg-root rw\n"
+      "31 25 8:1 / /boot rw,relatime shared:2 - ext2 /dev/sda1 rw\n"
+      "40 25 0:22 / /run rw,nosuid,nodev - tmpfs tmpfs rw\n")
+    w(root + "/proc/swaps",
+      "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n"
+      "/dev/dm-0                               partition\t8388604\t\t0\t\t-2\n")
+
+
 def main():
     for name, builder in (
         ("plain-sata", plain_sata),
         ("fourkn", fourkn),
         ("usb-stick", usb_stick),
+        ("luks-lvm", luks_lvm),
     ):
         root = os.path.join(HERE, "linux", name)
         if os.path.isdir(root):
