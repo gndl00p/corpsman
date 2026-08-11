@@ -8,6 +8,16 @@ of sectors years ago and none since is a working drive, and a rule that
 condemns any nonzero count would bin most of the used inventory that
 crosses a bench.
 
+The four scored attributes are not equally strong signals, and their
+thresholds are ordered accordingly. 197 (Current_Pending_Sector) and 198
+(Offline_Uncorrectable) mean the drive cannot read those sectors right now.
+187 (Reported_Uncorrect) means the host already received data back that the
+drive could not correct -- a realized failure. 5 (Reallocated_Sector_Ct)
+means a sector was successfully remapped, possibly years ago, with no
+recurrence since -- real but comparatively weak evidence. The sharper
+signals (187/197/198) threshold lower than the weaker one (5); see
+test_pending_sectors_threshold_is_tighter_than_reallocated.
+
 Attribute 199 is excluded from the drive verdict entirely and reported as a
 cabling fault, because UDMA CRC errors are interface errors -- a marginal
 SATA cable, backplane or USB bridge. Blaming the drive is how a good disk
@@ -20,10 +30,20 @@ from ..types import (
 
 # At or above these raw counts the drive is SCRAP.
 THRESHOLDS = {
-    5: 64,     # Reallocated_Sector_Ct
-    197: 16,   # Current_Pending_Sector
-    198: 16,   # Offline_Uncorrectable
+    5: 48,     # Reallocated_Sector_Ct  -- completed, successful remaps
+    187: 8,    # Reported_Uncorrect     -- host already got bad data back
+    197: 8,    # Current_Pending_Sector -- unreadable RIGHT NOW
+    198: 8,    # Offline_Uncorrectable  -- failed even offline
 }
+
+# A pending/reallocated count that grows between inspections is a stronger
+# signal than a larger static one, but a delta of exactly one is well
+# within normal aging noise -- a drive that picks up a single sector over a
+# year of service is not in trouble. `prior` comes from the ledger and may
+# be minutes or months old, and assess() has no timestamp, so the delta's
+# magnitude is the only qualifier available. Revisit when the ledger
+# supplies elapsed time.
+_GROWTH_FLOOR = 2
 
 # Above zero but below THRESHOLDS puts the drive in SCRATCH_ONLY.
 #
@@ -91,6 +111,21 @@ def assess(smart, prior=None):
         reasons.append("SMART overall self-assessment FAILED")
         return Verdict(HEALTH_SCRAP, reasons, cabling)
 
+    # Unreadable is not the same as healthy, and neither is unmeasured. A
+    # table that never reported any of the four scored attributes has told
+    # us nothing about the drive's condition -- treating that silence as
+    # "checked, clean" is the same mistake as treating available=False as
+    # REUSE, just arriving through the parsed-table door instead of the
+    # smartctl-invocation door.
+    present = [aid for aid in _WATCH if aid in smart.attrs]
+    if not present:
+        return Verdict(
+            HEALTH_UNKNOWN,
+            ["SMART parsed but reported none of the predictive attributes "
+             "(5, 187, 197, 198); nothing relevant was measured"],
+            cabling,
+        )
+
     scrap = False
     watch = False
 
@@ -103,9 +138,10 @@ def assess(smart, prior=None):
             reasons.append("%s (threshold %d)" % (_label(aid, value), threshold))
             scrap = True
             continue
-        # Rate of change matters more than magnitude. A pending count that
-        # climbed since the last inspection is worse than a larger static one.
-        if prior is not None and aid in prior and value > prior[aid]:
+        # Rate of change matters more than magnitude, but a delta of one is
+        # within normal aging noise -- require at least _GROWTH_FLOOR.
+        if (prior is not None and aid in prior and
+                (value - prior[aid]) >= _GROWTH_FLOOR):
             reasons.append(
                 "%s, up from %d since last inspection" % (_label(aid, value), prior[aid])
             )
@@ -122,6 +158,10 @@ def assess(smart, prior=None):
     # single-element list, silently dropping any accumulated informational
     # note (e.g. attribute 188) and losing it from the report. Appending
     # instead of replacing preserves those notes while still explaining why
-    # the verdict landed on REUSE.
-    reasons.append("no predictive attributes above zero")
+    # the verdict landed on REUSE. The wording also now names the
+    # attributes explicitly and says they were present, so this case reads
+    # differently from the "never reported at all" UNKNOWN case above.
+    reasons.append(
+        "predictive attributes (5, 187, 197, 198) present and read zero"
+    )
     return Verdict(HEALTH_REUSE, reasons, cabling)
