@@ -58,8 +58,11 @@ def test_bus_change_changes_token():
 
 
 def test_separator_injection_cannot_forge_another_devices_token():
-    # A field is firmware-controlled and may contain any bytes. Two
-    # distinct field tuples must never produce the same token.
-    a = mkdev(model="A", serial="B")
-    b = mkdev(model="A\x1fB", serial="")
+    # model/serial come from firmware-controlled USB string descriptors and
+    # may contain any bytes. Under the old \x1f-join both of these produced
+    # the joined blob "...A\x1fB\x1fC\x1fsata" and hashed to the same token
+    # (7a72e96a7425). Length-prefixed encoding makes the field boundaries
+    # unambiguous. Do not "simplify" this pair -- it is the regression.
+    a = mkdev(model="A", serial="B\x1fC")
+    b = mkdev(model="A\x1fB", serial="C")
     assert a.identity_token != b.identity_token
