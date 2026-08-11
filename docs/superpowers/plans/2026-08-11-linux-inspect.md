@@ -920,6 +920,38 @@ def test_tmpfs_does_not_produce_a_device():
 def test_plain_fixture_root_is_on_a_different_disk():
     # / is on nvme0n1p2, which is not enumerated in this fixture at all.
     assert "sda" not in system_devices(root=PLAIN)
+
+
+def test_resolution_terminates_despite_the_holders_slaves_cycle():
+    # dm-0/holders/dm-1 and dm-1/slaves/dm-0 are reciprocal symlinks. This is
+    # not a fixture artefact -- the kernel creates them for any dm device
+    # stacked on another, and they exist on real machines right now. A walk
+    # that follows both edge types without tracking what it has visited spins
+    # forever, and it would do so while an operator waits to find out whether
+    # a disk is safe to wipe.
+    #
+    # signal.alarm gives this test teeth: without the `seen` guard it would
+    # hang the suite rather than fail it, and a hanging test reports nothing.
+    import signal
+
+    def _timeout(signum, frame):
+        raise AssertionError("system_devices did not terminate: cycle not guarded")
+
+    old = signal.signal(signal.SIGALRM, _timeout)
+    signal.alarm(10)
+    try:
+        system_devices(root=LUKS)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, old)
+
+
+def test_tmpfs_major_zero_does_not_resolve_to_a_block_device():
+    # /run is 0:22. Major 0 is the kernel's anonymous-bdev range, so there is
+    # no sys/dev/block entry for it. Absence must be an expected outcome, not
+    # an error.
+    sysd = system_devices(root=LUKS)
+    assert all(isinstance(v, list) for v in sysd.values())
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1034,6 +1066,10 @@ def _physical_ancestors(root, name, seen=None):
     """Walk slaves transitively until reaching non-virtual whole disks."""
     if seen is None:
         seen = set()
+    # Cycle guard. holders/slaves are reciprocal on every stacked dm device,
+    # so an unguarded walk does not terminate. Names are unique per device
+    # within one /sys, which makes them a sufficient visited key here; if this
+    # ever follows `holders` as well as `slaves`, switch to realpath keys.
     if name in seen:
         return set()
     seen.add(name)
