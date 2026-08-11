@@ -507,12 +507,13 @@ So health gates read intensity — but the gate scales with risk instead of bein
 because imaging a degraded drive **is** the recommended action and blocking it would be
 backwards. The full ladder is specified in the
 [recovery design](2026-08-11-recovery-design.md); in short, a healthy drive runs with an
-informational note, a degraded one warns and takes a keystroke, a `SCRAP`/`UNKNOWN` one
-requires typing the serial suffix, and only mechanical-failure indicators — SMART spin-up
-failure, or IO errors present at enumeration — escalate to naming a recovery lab as the
-honest recommendation.
+informational note, anything already assessed as at-risk requires typing the serial suffix,
+and mechanical-failure indicators — SMART spin-up failure, a failing head, or IO errors
+present at enumeration — are hard-blocked by default andname a recovery lab as the honest
+recommendation.
 
-Every level still proceeds if the operator insists. It is their drive and their client, and
+Every level still proceeds if the operator insists, including the last, which takes the
+deliberately verbose `--override-mechanical-failure`. It is their drive and their client, and
 a tool that flatly refuses gets replaced by `dd`, which warns about nothing at all.
 
 ### The mapfile is GNU ddrescue's format exactly, or it is not claimed

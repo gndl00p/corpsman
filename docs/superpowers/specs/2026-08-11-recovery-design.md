@@ -56,19 +56,37 @@ What the operator has to do to run live, by health verdict:
 1. **`REUSE`** — runs. A single informational line notes that imaging first is safer if the
    data is irreplaceable. No prompt, no flag. This is the common case and it should feel
    like the tool is helping.
-2. **`SCRATCH_ONLY`** — one warning naming the attributes that produced the verdict, and a
-   `y/N` confirmation. One keystroke.
+2. **`SCRATCH_ONLY`** — warning naming the attributes that produced the verdict, then the
+   device's serial suffix typed to proceed.
+
+   An earlier draft made this a `y/N` keystroke. That was too thin for a drive the tool has
+   *already assessed as at-risk*: a `y` is reflexive, it is the answer to every prompt, and
+   it carries no evidence the operator read which attributes fired. Typing the suffix costs
+   about two seconds and is the difference between acknowledging and dismissing. Level 1
+   remains frictionless, which is where the ceremony budget belongs.
 3. **`SCRAP` or `UNKNOWN`** — the serious warning. Prints the specific failing attributes,
    states concretely that retry loops on failing media can convert a recoverable drive into
    one nobody can read, and that a recovery lab could likely still get this data today but
-   may not after this run. Requires typing the device's serial suffix, not a `y`.
-4. **Mechanical failure indicators** — SMART reporting spin-up failure, or IO errors already
-   occurring during enumeration. This is the cleanroom case, where the correct advice is to
-   power the drive down and send it out. The tool says so and requires
-   `--accept-media-risk` explicitly. It still proceeds if the operator insists, because it
-   is their drive and their client, and a tool that simply refuses gets replaced by `dd`.
+   may not after this run. Serial suffix typed to proceed.
+4. **Mechanical failure indicators** — SMART reporting spin-up failure, a failing head, or IO
+   errors already occurring during enumeration. **Hard-blocked by default.**
 
-`--accept-media-risk` pre-answers levels 2 through 4 for scripted use.
+   This is the cleanroom case and it is genuinely different in kind from the levels above.
+   Everything else on this ladder risks wearing out media that is already worn. This risks
+   the client's only copy, in the next few minutes, to a head that is failing right now — and
+   it is the one case where the drive going back in a box unpowered is worth real money to
+   them.
+
+   It remains overridable, because it is the operator's drive and their client, and a tool
+   that flatly refuses gets replaced by `dd`, which warns about nothing at all. But the
+   override is **`--override-mechanical-failure`**, which is deliberately verbose, cannot be
+   typed by accident, and is not what anyone reaches for reflexively. Interactive use
+   additionally requires typing the serial suffix after reading what the tool expects to
+   happen.
+
+`--accept-media-risk` pre-answers levels 2 and 3 for scripted use. **It does not reach level
+4** — that needs its own flag, so a batch script written for ordinary degraded drives cannot
+silently escalate into powering a mechanically failing one.
 
 ### Bailing out mid-run
 
@@ -90,7 +108,8 @@ somewhere safe, and the alternative is usually doing nothing or doing something 
 
 `image` therefore warns and proceeds on confirmation for ordinary degraded drives. It
 escalates to the level 4 treatment above only for mechanical-failure indicators, where
-powering the drive at all is the risk and a lab is the honest recommendation.
+powering the drive at all is the risk and a lab is the honest recommendation — and there,
+as everywhere else, `--override-mechanical-failure` still lets the operator proceed.
 
 ## `doc recover parts` — partition recovery
 

@@ -163,12 +163,18 @@ Ceremony scales with the product of health and read intensity:
 | Health | What running live costs you |
 |---|---|
 | `REUSE` | Runs. One informational line. No prompt, no flag. |
-| `SCRATCH_ONLY` | One warning naming the attributes, `y/N`. |
+| `SCRATCH_ONLY` | Warning naming the attributes, then type the serial suffix. |
 | `SCRAP` / `UNKNOWN` | Serious warning, type the serial suffix — not a `y`. |
-| Mechanical failure | Names a recovery lab as the honest answer, needs `--accept-media-risk`. |
+| Mechanical failure | **Hard-blocked by default.** Names a recovery lab. Overridable only with `--override-mechanical-failure`. |
 
-**Every level still proceeds if you insist.** It's your drive and your client, and a tool
-that flatly refuses gets replaced by `dd`, which warns about nothing at all.
+**Every level still proceeds if you insist**, including the last — it's your drive and your
+client, and a tool that flatly refuses gets replaced by `dd`, which warns about nothing at
+all. But mechanical failure is different in kind from the rest of the ladder: everything else
+risks wearing out media that's already worn, while a failing head risks the client's only
+copy in the next few minutes. So its override is a separate, deliberately verbose flag rather
+than the one you'd already be passing, and `--accept-media-risk` deliberately doesn't reach
+it — a batch script written for ordinary degraded drives can't silently escalate into
+powering a dying one.
 
 If a live run starts throwing IO errors that weren't there at enumeration, the drive is
 degrading under the workload right now — it halts, reports what it got, and offers to hand
