@@ -9,8 +9,25 @@ offline from a rescue USB. (The single file is a build artifact — source is on
 layer, concatenated at build time, because a monolith mixing SMART parsing with the wipe
 execution path is the wrong trade for a tool whose failure modes are destructive.)
 
-> **Status: design phase.** The spec is complete and has been through adversarial
-> review. No implementation has landed. Do not point this at hardware.
+> **Status: Phase 1 — Linux `inspect` only.** `doc inspect [device] [--json]` is the
+> only command that exists. Everything else shown below — `test`, `image`, `clone`,
+> `wipe`, `recover`, `ledger`, `serve-mcp`, the TUI — is design in
+> `docs/superpowers/specs/`, not code. 117 tests pass (`python3 -m pytest tests/ -v`).
+> `doc` itself is a build artifact (`python3 build.py`, gitignored) assembled from
+> `src/corpsman/`.
+>
+> **Linux only.** macOS and Windows are refused rather than guessed at — there is no
+> backend for either. Device identity, topology (including LUKS/LVM/mdraid resolution
+> to the physical disk), and SMART-based health verdicts work on Linux and are covered
+> by fixture-based tests. SMART is read via `smartctl --json`; a device whose SMART
+> cannot be read reports `UNKNOWN`, never `REUSE`.
+>
+> **No destructive code path exists in this tree.** A guard test
+> (`tests/test_guards.py::test_no_device_write_paths_in_phase_one`) scans for the
+> obvious write-mode flags and destructive binaries, but it is a substring smoke alarm,
+> not a proof of read-only-ness — see [`docs/PHASE1-SMOKE.md`](docs/PHASE1-SMOKE.md)
+> for the manual verification procedure and its limits before pointing this at real
+> hardware.
 
 Invoked as `doc`.
 
