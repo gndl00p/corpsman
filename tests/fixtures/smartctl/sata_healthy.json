@@ -1,0 +1,21 @@
+{
+  "json_format_version": [1, 0],
+  "smartctl": {"version": [7, 4], "exit_status": 0},
+  "device": {"name": "/dev/sda", "type": "sat"},
+  "model_name": "Samsung SSD 870 EVO 1TB",
+  "serial_number": "S5Y2NJ0T304891",
+  "smart_status": {"passed": true},
+  "power_on_time": {"hours": 8112},
+  "ata_smart_attributes": {
+    "table": [
+      {"id": 5,   "name": "Reallocated_Sector_Ct", "raw": {"value": 0}},
+      {"id": 9,   "name": "Power_On_Hours",        "raw": {"value": 8112}},
+      {"id": 187, "name": "Reported_Uncorrect",    "raw": {"value": 0}},
+      {"id": 188, "name": "Command_Timeout",       "raw": {"value": 0}},
+      {"id": 194, "name": "Temperature_Celsius",   "raw": {"value": 34}},
+      {"id": 197, "name": "Current_Pending_Sector","raw": {"value": 0}},
+      {"id": 198, "name": "Offline_Uncorrectable", "raw": {"value": 0}},
+      {"id": 199, "name": "UDMA_CRC_Error_Count",  "raw": {"value": 0}}
+    ]
+  }
+}
