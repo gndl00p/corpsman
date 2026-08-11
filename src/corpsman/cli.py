@@ -19,6 +19,14 @@ from .types import (
 
 SCHEMA = 1
 
+# HEALTH_UNKNOWN is deliberately absent from this map, so `.get(health, 3)`
+# makes it outrank every scored health, including SCRAP. An unreadable
+# drive is an audit gap, not a graded result: it may be masking a failing
+# controller or cable that is about to take out every disk on that bus. If
+# SCRAP outranked UNKNOWN, an operator could replace the one obviously-bad
+# drive and walk away from a device that was never actually checked. Do not
+# "tidy" HEALTH_UNKNOWN into this mapping at 2 -- see
+# test_unknown_outranks_scrap_in_the_exit_code.
 _EXIT = {
     HEALTH_REUSE: 0,
     HEALTH_SCRATCH_ONLY: 1,
@@ -35,8 +43,17 @@ _TRIAGE = {
 }
 
 
-def build_report(devices, sysmap, smart_by_name):
-    # type: (list, dict, dict) -> dict
+def build_report(devices, all_devices, sysmap, smart_by_name):
+    # type: (list, list, dict, dict) -> dict
+    """Build the report for `devices`, but judge collisions against
+    `all_devices`.
+
+    Uniqueness of a serial is a property of the whole machine, not of
+    whatever subset is being displayed (e.g. a `--device` filter). Judging
+    it against a filtered list of one always finds no duplicate, silently
+    handing back a serial that collides elsewhere on the same box -- see
+    test_filtering_by_device_does_not_hide_a_serial_collision.
+    """
     out = []
     for d in devices:
         s = smart_by_name.get(d.name)
@@ -45,7 +62,7 @@ def build_report(devices, sysmap, smart_by_name):
             "name": d.name,
             "path": d.path,
             "identity_token": d.identity_token,
-            "confirm": confirm_string(devices, d),
+            "confirm": confirm_string(all_devices, d),
             "model": d.model,
             "serial": d.serial,
             "wwn": d.wwn,
@@ -93,9 +110,11 @@ def cmd_inspect(args, stream=sys.stdout):
                      "on partial data is worse than no verdict.\n")
         return 3
 
-    devices = identity_linux.enumerate_devices(root=args.root)
+    all_devices = identity_linux.enumerate_devices(root=args.root)
+    shown = all_devices
     if args.device:
-        devices = [d for d in devices if d.path == args.device or d.name == args.device]
+        shown = [d for d in all_devices
+                 if d.path == args.device or d.name == args.device]
     try:
         sysmap = topology_linux.system_devices(root=args.root)
     except topology_linux.TopologyError as exc:
@@ -106,8 +125,17 @@ def cmd_inspect(args, stream=sys.stdout):
                      "refusing to report device safety blind\n" % exc)
         return 3
     probe = Probe()
-    smart_by_name = dict((d.name, collect(d, probe)) for d in devices)
-    report = build_report(devices, sysmap, smart_by_name)
+    smart_by_name = dict((d.name, collect(d, probe)) for d in shown)
+    report = build_report(shown, all_devices, sysmap, smart_by_name)
+
+    if not report["devices"]:
+        # "Nothing was inspected" must never read as "everything is
+        # healthy" -- the same failure mode fixed in system_devices().
+        if args.device:
+            stream.write("no device matched %r; nothing inspected\n" % args.device)
+        else:
+            stream.write("no storage devices found; nothing inspected\n")
+        return 3
 
     if args.json:
         stream.write(json.dumps(report, indent=2) + "\n")
