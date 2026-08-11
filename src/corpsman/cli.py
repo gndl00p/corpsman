@@ -88,7 +88,7 @@ def _human(report, stream):
             flag = "  [SYSTEM: %s]" % ", ".join(d["system_state"])
         stream.write("%s  %.1f GB  %s  #%s%s\n"
                      % (d["path"], gb, d["model"] or "unknown",
-                        d["serial"] or d["identity_token"], flag))
+                        d["confirm"], flag))
         if d["health"] == HEALTH_SCRAP:
             stream.write("  ** CORPSMAN UP **\n")
         stream.write("  %s (%s)\n" % (d["health"], _TRIAGE.get(d["health"], "")))
@@ -157,6 +157,17 @@ def main(argv=None):
     p.add_argument("--root", default="/", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.command == "inspect":
-        return cmd_inspect(args)
+        try:
+            return cmd_inspect(args)
+        except Exception as exc:
+            # A crash must never be graded as a health result -- an
+            # uncaught exception exiting 1 collides with the RMM contract's
+            # "warning drive present" exit code. Report it plainly and
+            # refuse, same as every other unknown condition in this tool.
+            sys.stderr.write(
+                "corpsman: unexpected error: %s: %s\n"
+                % (type(exc).__name__, exc)
+            )
+            return 3
     parser.print_help()
     return 0
