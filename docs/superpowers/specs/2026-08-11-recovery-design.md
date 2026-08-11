@@ -1,0 +1,134 @@
+# corpsman recovery — `doc recover`
+
+**Status:** design. No implementation yet.
+**Date:** 2026-08-11
+**Parent design:** [2026-08-10-corpsman-design.md](2026-08-10-corpsman-design.md)
+
+Getting client data back, as opposed to `doc image` which captures a device and
+`doc restore` which writes one back.
+
+    doc recover carve    <image> <outdir>   # signature-based extraction
+    doc recover undelete <image> <outdir>   # filesystem-aware, with names and paths
+    doc recover parts    <image|device>     # scan for lost partitions, read-only
+    doc recover parts --repair <device>     # write a rebuilt table  [DEVIL DOC]
+
+## The governing rule: recover from the image, not the patient
+
+Every recovery verb takes an **image file** as its default input, not a device. This is
+not a convenience choice, it is the professional discipline the whole subsystem is built
+around:
+
+- A recovery scan is thousands of seeks across the full surface. On a drive that is already
+  failing — which is the drive people want recovered — that workload is a well-documented
+  way to finish it off. The first thing a recovery house does is image the patient and then
+  never touch it again.
+- Carving produces output. Output must never land on the source device, and operating from
+  an image makes that structurally impossible rather than a check that can be forgotten.
+- An image is reproducible. A failing drive gives different answers on successive reads, so
+  a recovery run against live media cannot be repeated or reviewed.
+
+Running against live media is possible with `--live`, and refuses without
+`--accept-media-risk` when health is `SCRAP` or `UNKNOWN`, matching `doc image`. The TUI
+offers "image first, then recover" as the default path and requires a deliberate detour to
+do anything else.
+
+## `doc recover parts` — partition recovery
+
+The most common recoverable disaster and the fastest win in front of a client: the drive
+enumerates, SMART is clean, and the machine reports it as unallocated. The data is all
+still there; the table describing it is gone.
+
+- Parse the existing MBR and GPT, including the GPT backup header at the end of the device,
+  which frequently survives when the primary is destroyed. A great many "unallocated" drives
+  are repaired by restoring the primary from the backup and nothing else.
+- When both are gone, scan the full surface for filesystem superblocks and boot signatures —
+  NTFS `$Boot`, ext2/3/4 superblocks at the standard offsets and their backups, FAT boot
+  sectors, APFS and HFS+ headers, exFAT — and reconstruct a plausible table from what is
+  found and where.
+- Report candidates with confidence and let the operator choose. Never auto-apply.
+
+**`--repair` writes to the device and is therefore DEVIL DOC only**, gated by the same
+topology refusals, identity confirmation, and device locking as `wipe`. Before writing, the
+current sector 0 and the GPT areas are backed up into the ledger directory so the operation
+is reversible. A partition-table repair that cannot be undone is not a repair, it is a
+second disaster.
+
+## `doc recover carve` — signature-based extraction
+
+Filesystem-agnostic. Scan the image for known file headers, determine extent by footer or
+by structure, and write out what is found. Recovers data from a filesystem too damaged to
+parse, and from unallocated space where the directory entry is long gone.
+
+- Ships with signatures for the formats that matter in an MSP context: JPEG, PNG, GIF, TIFF,
+  HEIC, PDF, ZIP and the OOXML family that rides on it (`.docx`, `.xlsx`, `.pptx`), legacy
+  OLE2 Office, MP4/MOV, SQLite, PST/OST, and common archive formats.
+- Fragmented files are the known limit of all carving and the docs say so plainly. A carver
+  recovers contiguous runs; a file scattered across the disk comes back truncated or not at
+  all. Overstating this is how a client is told their data is safe when it is not.
+- Output is named by offset and type, deduplicated by hash, and accompanied by a manifest
+  recording where each artifact came from. Carved files have no original names — that is
+  what `undelete` is for.
+
+## `doc recover undelete` — filesystem-aware
+
+Higher-value output than carving, because files come back with their **original names,
+paths, timestamps, and sizes**, and because the filesystem's own records identify extents
+so fragmented files can be reassembled correctly.
+
+- **NTFS:** parse `$MFT`, walk records with the in-use flag clear, resolve data runs and
+  reassemble from them. Handles resident (small) files stored inline in the MFT record, and
+  reads `$MFT` fragmentation via `$MFT`'s own attribute list. `$LogFile` and `$UsnJrnl` are
+  read where present for recently-deleted entries the MFT has already reused.
+- **ext2/3/4:** parse superblock and group descriptors, walk inode tables for inodes with
+  a zeroed link count, and follow extent trees (ext4) or indirect block chains (ext2/3).
+  ext4 zeroes extent info on delete more aggressively than ext3 did, so expected yield is
+  lower and the tool reports that rather than implying parity.
+- **FAT12/16/32 and exFAT:** directory entries marked deleted retain the full name minus its
+  first character and the starting cluster; walk the FAT chain where it survives.
+
+Each filesystem parser is a self-contained module reading from a byte-range interface, so it
+is tested against small crafted images committed to the repo rather than against hardware.
+
+## External tools as accelerators
+
+Consistent with how `hdparm`, `nvme-cli`, and `smartctl` are already treated: if `testdisk`
+or `photorec` is present, corpsman can drive it and normalise its output into the same
+manifest and ledger format. Absent, the built-in implementations do the work.
+
+This is not a fallback hierarchy where the external tool is the real implementation — the
+built-ins are first-class and independently tested. PhotoRec in particular has a signature
+corpus no reimplementation will match, so offering it where installed is honest rather than
+proud.
+
+## Output safety
+
+- Refuses to write output onto the source device, or onto the filesystem holding the source
+  image, unless explicitly overridden.
+- Checks free space against a size estimate **before** starting rather than failing partway
+  through a multi-hour extraction.
+- Every run writes a manifest — source image hash, verb, parameters, artifact count and
+  bytes, per-artifact origin offset and hash — and appends a summary to the ledger.
+
+## Explicitly still out of scope
+
+- **Filesystem repair.** `fsck`, `chkdsk`, and rebuilding a mountable filesystem in place.
+  Repair mutates the patient and can destroy recoverable data; corpsman extracts to a new
+  location instead. This is a deliberate line, not an omission.
+- RAID reassembly and parity reconstruction across member disks.
+- Encrypted volumes without the key. BitLocker, FileVault, and LUKS containers are detected
+  and reported as encrypted, never guessed at.
+- Physically damaged media requiring a cleanroom, head transplant, or PCB swap. The tool
+  should say so and name that as the correct next step.
+
+## Build order
+
+The four capabilities differ enormously in effort, and shipping them in value order means
+something useful exists early:
+
+1. **`parts`** — smallest and highest immediate value. Restoring a GPT from its backup
+   header fixes a large share of real cases in seconds.
+2. **External tool wrapping** — near-free capability once the manifest format exists.
+3. **`carve`** — self-contained, no filesystem knowledge, testable against crafted images.
+4. **`undelete`** — by far the largest. A correct NTFS `$MFT` parser is a serious piece of
+   work with a long tail of edge cases, and ext4 extent trees are not far behind. Sequence
+   it as NTFS first, since it is the overwhelming majority of client data in this shop.

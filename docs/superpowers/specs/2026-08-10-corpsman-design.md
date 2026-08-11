@@ -6,21 +6,80 @@
 
 ## What it is
 
-A single-file, zero-dependency CLI that handles the whole life-end workflow for storage
-media on a bench: figure out what the drive is, decide whether it is worth keeping,
-capture what is on it, destroy what is on it, and leave a record.
+A zero-dependency, single-file terminal application that handles the whole life-end workflow
+for storage media on a bench: figure out what the drive is, decide whether it is worth
+keeping, capture what is on it, get data back off it, destroy what is on it, and leave a
+record.
+
+A full-screen TUI is the primary interface for interactive bench work. Every operation is
+also a CLI subcommand, because the RMM check, the MCP server, and batch runs need one.
 
 Invoked as `doc`.
 
+    doc                              # full-screen TUI (this is the primary interface)
+
     doc inspect  /dev/sdb            # identity, SMART, health verdict
     doc test     /dev/sdb            # self-tests, surface scan, throughput
-    doc recover  /dev/sdb out.img    # error-tolerant capture off a dying drive
+    doc image    /dev/sdb out.img    # error-tolerant capture off a dying drive
+    doc recover  carve    out.img outdir/
+    doc recover  undelete out.img outdir/
+    doc recover  parts    out.img    # scan for lost partitions (read-only)
     doc ledger   --verify
     doc serve-mcp                    # read-only MCP server
 
     # DEVIL DOC mode only:
     doc wipe     /dev/sdb            # the zeroize engine
     doc restore  in.img /dev/sdb     # writes an image ONTO a device
+    doc recover  parts --repair /dev/sdb   # writes a rebuilt partition table
+
+`recover` names the recovery family — getting data back. Capture is `image`, which is what
+it always was; an intermediate draft called capture `recover` and that collided the moment
+real recovery entered scope.
+
+## The TUI is the primary interface
+
+Typing a device path is itself a footgun. `/dev/sdb` is not a stable name, it shifts when
+something is replugged, and nothing about typing it forces the operator to look at what
+they are addressing. Selecting from a list that displays model, serial, size, bus, health
+verdict, and a red `BACKS YOUR ROOT FILESYSTEM` marker is strictly safer than typing four
+characters that may mean something different than they did a minute ago.
+
+Running `doc` with no arguments enters the TUI. Running it with a subcommand behaves
+exactly as specified elsewhere in this document — the CLI is not a second-class path, it is
+what the RMM check, the MCP server, and any batch use drive, and neither of those can be
+operated by a menu.
+
+### Rendering
+
+Hand-rolled ANSI/VT, not `curses`. `curses` is stdlib on Unix and absent on Windows, and
+depending on `windows-curses` would break the zero-dependency guarantee. Windows 10+
+consoles support VT sequences once `ENABLE_VIRTUAL_TERMINAL_PROCESSING` is set via
+`SetConsoleMode`, reachable through `ctypes`.
+
+Terminal capability is detected rather than assumed. Full-screen requires a TTY, a usable
+`TERM`, and working VT support. Anything else — a serial console, an IPMI text redirect, a
+recovery shell, a dumb terminal, a CI capture — **falls back to a numbered menu** that uses
+no raw mode and no escape sequences. On a bench these are not hypothetical conditions;
+they are Tuesday.
+
+### Terminal state is restored unconditionally
+
+A tool that leaves the terminal in raw mode after a crash is a tool people stop using. Raw
+mode is entered and exited through a context manager, with restoration additionally wired
+to `atexit` and to the `SIGINT`/`SIGTERM` handlers already specified in the operational
+invariants. `SIGWINCH` triggers a re-layout rather than a corrupted frame.
+
+### The TUI does not weaken any safety control
+
+- Devices resolved as system-state ancestors render locked and are **not selectable** for
+  destructive actions at all. The refusal is not a dialog that can be clicked past.
+- Arming still requires the held chord. The TUI is already in raw mode, so the hold reads
+  naturally and renders its own charge meter.
+- The final gate before a destructive operation remains typing the device's serial suffix,
+  shown on the identity card. Visual selection reduces the chance of addressing the wrong
+  device; it does not replace the confirmation that the operator read the identity.
+- The mode banner is persistent in the header. There is no screen on which a user can be
+  armed and not see it.
 
 ## Why one tool instead of a wiper plus a diagnostics tool
 
@@ -35,10 +94,13 @@ exercised least would be the one wired to destruction.
 
 ## Two modes: AID STATION and DEVIL DOC
 
-The tool boots into **AID STATION** — read-only. `inspect`, `test`, `recover`, and
-`ledger` work. Destructive subcommands (`wipe`, `restore`, `test --destructive`) are not
-merely refused: they are **not registered**. They do not appear in `--help`, they do not
-parse, and the MCP server does not advertise them.
+The tool boots into **AID STATION** — read-only. `inspect`, `test`, `image`, `recover`
+(except `parts --repair`), and `ledger` work.
+
+Destructive operations — `wipe`, `restore`, `recover parts --repair`, and
+`test --destructive` — are hidden from `--help`, absent from the MCP tool list and from the
+TUI's action bar, and refuse at dispatch. Hiding is a usability affordance; the enforcement
+is at dispatch and again immediately before the first destructive syscall.
 
 Arming switches to **DEVIL DOC** — doc picked up a rifle.
 
@@ -137,7 +199,7 @@ Four layers are common to every subcommand:
 - `identify` — composite identity token per device. Serial is not trusted as identity;
   see the wipe spec for why (USB bridges, blank and duplicate serials).
 - `topology` — full block-device dependency graph and active system state. Every
-  subcommand consults it; `wipe` refuses on it, `inspect` and `recover` annotate with it
+  subcommand consults it; `wipe` refuses on it, `inspect` and `image` annotate with it
   so the operator can see "this device currently backs your root filesystem."
 - `probe` — runtime capability detection for optional accelerators (smartctl, nvme-cli,
   hdparm, sg3_utils, sedutil-cli, ddrescue, cdrecord). Probed once, cached, reported.
@@ -350,26 +412,29 @@ left regions unwritten.
 - Sequential throughput sample, to catch the drive that passes every health check and
   runs at 4 MB/s because it is quietly retrying everything.
 
-## `doc recover` and `doc restore`
+## `doc image` and `doc restore`
 
-Two directions, and only one of them is safe. `recover` reads a device into an image file
-and runs in AID STATION. `restore` writes an image onto a device, which destroys whatever
-is there, so it is DEVIL DOC only and sits behind the same topology refusals and identity
-confirmation as `wipe`.
+Two directions, and only one of them is safe. `image` reads a device into an image file and
+runs in AID STATION. `restore` writes an image onto a device, which destroys whatever is
+there, so it is DEVIL DOC only and sits behind the same topology refusals, identity
+confirmation, and device locking as `wipe`.
 
-`recover` is error-tolerant, ddrescue-shaped, because the drives most worth capturing are
+Getting data back out of an image is a separate subsystem — see the
+[recovery design](2026-08-11-recovery-design.md).
+
+`image` is error-tolerant, ddrescue-shaped, because the drives most worth capturing are
 the ones actively dying.
 
 ### Reading a failing drive is not harmless
 
-An earlier draft allowed `recover` freely in AID STATION on the reasoning that reads are
+An earlier draft allowed capture freely in AID STATION on the reasoning that reads are
 safe. They are safe for the *data* but not for the *media*. Sustained retry on a failing
 drive keeps the heads loaded and the platters spinning, generates heat, and is a
 well-documented way to convert a drive a professional recovery house could have read into
 one nobody can. The most valuable case — a client's only copy on a dying disk — is exactly
 the case where an amateur retry loop does the most damage.
 
-So `recover` checks health first. On a `SCRAP` or `UNKNOWN` verdict it prints the specific
+So `image` checks health first. On a `SCRAP` or `UNKNOWN` verdict it prints the specific
 failing attributes, states plainly that continuing may destroy data a recovery lab could
 have retrieved, and refuses unless `--accept-media-risk` is passed. For genuinely
 irreplaceable data the correct advice is to stop and send the drive out, and the tool says
@@ -445,8 +510,8 @@ simply absent, because defense in depth is cheap here. Drive destruction require
 at a keyboard who held a physical chord and typed an identity token, and no chain of
 prompt text should be able to reach it.
 
-`recover` is not exposed by default either — it is read-only with respect to the source
-device, but it writes large files and is enabled only with `--allow-recover`.
+`image` is not exposed by default either — it is read-only with respect to the source
+device, but it writes large files and is enabled only with `--allow-image`.
 
 The server is also read-only about the ledger: it can validate and read the chain, never
 append to it.
@@ -461,7 +526,7 @@ append to it.
   including drives that report garbage, USB bridges that report nothing, and at least one
   drive with a nonzero 199 to assert the cabling verdict is separated correctly.
 - `strategy` and the health verdict are pure table tests.
-- `execute` and `recover` run against loopback and sparse-file devices, and a scratch USB
+- `execute` and `image` run against loopback and sparse-file devices, and a scratch USB
   stick. Never against real disks in CI.
 - A refusal suite asserts non-zero exit for every topology refusal case.
 - An MCP suite asserts `wipe` is absent from the advertised tool list.
@@ -470,6 +535,7 @@ append to it.
 
 - Firmware-resident malware survives all of this. Suspect it, destroy the device.
 - Lab-grade forensic recovery — electron microscopy, platter transplant.
-- Filesystem-level repair and file recovery. This tool works at the block layer;
-  `fsck`/`chkdsk`/PhotoRec are different jobs and better tools already exist.
+- Filesystem *repair* — `fsck`, `chkdsk`, rebuilding a mountable filesystem in place.
+  Repair mutates the patient and can destroy recoverable data. File *recovery* is in scope
+  and specified separately in the [recovery design](2026-08-11-recovery-design.md).
 - Any guarantee the media still functions afterward.

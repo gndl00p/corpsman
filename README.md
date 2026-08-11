@@ -1,28 +1,87 @@
 # corpsman
 
 Drive doctor for the bench. Figures out what the drive is, whether it is worth keeping,
-captures what is on it, destroys what is on it, and leaves a record.
+captures what is on it, gets data back off it, destroys what is on it, and leaves a record.
 
 One file. Python 3.8+. Windows, macOS, Linux. No dependencies, no install step, runs
 offline from a rescue USB. (The single file is a build artifact — source is one module per
 layer, concatenated at build time, because a monolith mixing SMART parsing with the wipe
 execution path is the wrong trade for a tool whose failure modes are destructive.)
 
+> **Status: design phase.** The spec is complete and has been through adversarial
+> review. No implementation has landed. Do not point this at hardware.
+
 Invoked as `doc`.
 
 ```
+doc                             # full-screen TUI - the primary interface
+
 doc inspect /dev/sdb            # identity, SMART, health verdict
 doc test    /dev/sdb            # self-tests, surface scan, throughput
-doc recover /dev/sdb out.img    # error-tolerant capture off a dying drive
+doc image   /dev/sdb out.img    # error-tolerant capture off a dying drive
+doc recover carve    out.img outdir/
+doc recover undelete out.img outdir/
+doc recover parts    out.img    # scan for lost partitions
 doc ledger  --verify
 doc serve-mcp                   # read-only MCP server
 
-doc wipe    /dev/sdb            # DEVIL DOC mode only
-doc restore in.img /dev/sdb     # DEVIL DOC mode only
+doc wipe    /dev/sdb                   # DEVIL DOC mode only
+doc restore in.img /dev/sdb            # DEVIL DOC mode only
+doc recover parts --repair /dev/sdb    # DEVIL DOC mode only
 ```
 
-> **Status: design phase.** The spec is complete and has been through adversarial
-> review. No implementation has landed. Do not point this at hardware.
+## The TUI
+
+```
++- CORPSMAN ------------ AID STATION -+
+| > sda  1.0T Samsung 870    REUSE    |
+|   sdb  4.0T WD40EFRX       SCRAP  ! |
+|   sdc   32G SanDisk USB    REUSE    |
+|   nvme0 512G SN770  [ROOT FS]  lock |
++-------------------------------------+
+| sdb  WD-WCC4E5RJ0K2P  4.0 TB  SATA  |
+| 197 Current_Pending  41  ^ +12 / 7d |
+| 5   Reallocated     128             |
+| 9   Power_On_Hours 41203            |
+| ** CORPSMAN UP ** expectant         |
++-------------------------------------+
+| i inspect  t test  r recover        |
+| ^AD arm     q quit                  |
++-------------------------------------+
+```
+
+Typing a device path is itself a footgun. `/dev/sdb` isn't a stable name, it shifts when
+something gets replugged, and typing it doesn't force you to look at what you're
+addressing. Picking from a list showing model, serial, size, health, and a red
+`[ROOT FS]` marker is strictly safer.
+
+Hand-rolled ANSI/VT rather than `curses`, which is stdlib on Unix but absent on Windows —
+`ctypes` flips on `ENABLE_VIRTUAL_TERMINAL_PROCESSING` there. Serial consoles, IPMI text
+redirects, recovery shells, and dumb terminals **fall back to a numbered menu** with no
+raw mode and no escape sequences. On a bench those aren't hypothetical.
+
+System-state ancestors render locked and aren't selectable for destructive actions at all —
+the refusal isn't a dialog you can click past. Arming still needs the held chord, and the
+mode banner is always in the header.
+
+## Recovery
+
+Every recovery verb takes an **image**, not a device. That's the professional discipline,
+not a convenience: a recovery scan is thousands of seeks across a drive that's already
+failing, which is a documented way to finish it off. Image the patient, then never touch it
+again. `--live` exists and refuses on a `SCRAP` verdict without `--accept-media-risk`.
+
+| Verb | What it does |
+|---|---|
+| `parts` | Restore a GPT from its backup header, or rebuild a table by scanning for filesystem superblocks and boot signatures. Fixes the very common "drive shows unallocated but everything's still there." |
+| `carve` | Signature-based extraction — JPEG, PNG, PDF, OOXML, MP4, SQLite, PST. No filesystem needed. Fragmented files are the known limit of all carving and the docs say so. |
+| `undelete` | Filesystem-aware, so files come back with original **names, paths, and timestamps**. NTFS `$MFT`, ext2/3/4 inodes and extent trees, FAT/exFAT directory entries. |
+
+`parts --repair` writes to the device, so it's DEVIL DOC only, and it backs up the existing
+sector 0 and GPT areas first. A partition repair you can't undo isn't a repair.
+
+Filesystem *repair* stays out of scope — `fsck` and `chkdsk` mutate the patient and can
+destroy recoverable data. corpsman extracts to a new location instead.
 
 ## Two modes
 
@@ -103,7 +162,7 @@ toward refusing to act and toward under-claiming.
   LBA layer, which is the whole reason they outrank overwrite. One that could only be
   overwritten is `CLEARED` with an explicit disclosure of the unreachable sectors. Binning
   every drive with remap history would condemn most used enterprise inventory.
-- **Reading a dying drive isn't harmless either.** `recover` refuses on a `SCRAP` verdict
+- **Reading a dying drive isn't harmless either.** `image` refuses on a `SCRAP` verdict
   without `--accept-media-risk`, because retry loops on failing media are a known way to
   destroy data a recovery lab could have gotten. For an only-copy, the right advice is to
   stop and send it out, and the tool says so.
@@ -204,8 +263,10 @@ attested by the operator who ran it, and nothing more.
 ## Out of scope
 
 Firmware-resident malware survives everything here — suspect it, destroy the device.
-Lab-grade forensic recovery. Filesystem repair and file-level recovery, which are a
-different job with better existing tools. Any guarantee the media still works afterward.
+Lab-grade forensic recovery needing a cleanroom, head transplant, or PCB swap. Filesystem
+*repair* in place. RAID reassembly. Encrypted volumes without the key — BitLocker,
+FileVault, and LUKS are detected and reported, never guessed at. Any guarantee the media
+still works afterward.
 
 ## License
 
