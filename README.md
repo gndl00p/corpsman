@@ -4,8 +4,9 @@ Drive doctor for the bench. Figures out what the drive is, whether it is worth k
 captures what is on it, gets data back off it, moves it to a replacement, destroys what is
 on it, and leaves a record.
 
-One file. Python 3.8+. Windows, macOS, Linux. No dependencies, no install step, runs
-offline from a rescue USB. (The single file is a build artifact — source is one module per
+One file. Python 3.8+. Linux today; macOS and Windows are designed for but not built (see
+Status below). No dependencies, no install step, runs offline from a rescue USB. (The
+single file is a build artifact — source is one module per
 layer, concatenated at build time, because a monolith mixing SMART parsing with the wipe
 execution path is the wrong trade for a tool whose failure modes are destructive.)
 
@@ -268,8 +269,15 @@ toward refusing to act and toward under-claiming.
   execution cannot redirect the operation.
 - **The system-disk check walks the whole chain.** `/` on a LUKS+LVM host is
   `/dev/mapper/vg-root` → `/dev/sda2` → `/dev/sda`. Refusing only the literal root device
-  is not a safety check. LVM, LUKS, mdraid, ZFS, btrfs, APFS containers, and Storage
-  Spaces all resolve to their physical members. No override flag.
+  is not a safety check. As implemented today, Phase 1 resolves LVM, LUKS, mdraid, and
+  other device-mapper stacks to their physical members, via `/sys/block/*/slaves` — the
+  edge the kernel maintains for all of them. **It does not currently resolve btrfs, ZFS,
+  or overlayfs**, which allocate anonymous superblock devices under major 0 rather than a
+  real block device, and multi-device btrfs/ZFS expose no `slaves` links either. On a
+  btrfs- or ZFS-root host — the Fedora and openSUSE default — the boot disk can plausibly
+  show **no** `[SYSTEM]` flag at all. This must be closed before any destructive phase
+  lands; APFS containers and Storage Spaces are unimplemented Windows/macOS design, not
+  working code. No override flag.
 - **The safe commands share the dangerous command's targeting code.** `inspect` and
   `test` run on the same `identify` and `topology` layers as `wipe`, so the high-risk
   code gets exercised harmlessly many times a day rather than only when it is armed.

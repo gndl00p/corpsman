@@ -82,12 +82,28 @@ Expect one block per whole disk. **Partitions must not appear as devices.**
 
 ## 5. The system-disk check is the one that matters
 
-Confirm your boot disk is marked `[SYSTEM: /]` — and on a LUKS or LVM
-machine, confirm the mark lands on the *physical* disk (`sda`, `nvme0n1`),
-not only on the mapper device (`/dev/mapper/vg-root`, `/dev/dm-0`).
+**First, check what filesystem `/` actually is:**
 
-If your boot disk is NOT flagged, stop. That is the bug this phase exists to
-prevent, and no destructive code may be written until it is fixed.
+    findmnt -no FSTYPE /
+
+If this reports `btrfs` or `zfs`, **the system-state flag cannot currently be
+trusted on this host.** Phase 1's topology resolver walks
+`/sys/block/*/slaves`, which covers LVM, LUKS, mdraid, and other
+device-mapper stacks — but btrfs and ZFS allocate anonymous superblock
+devices (major 0) rather than a real block device, and multi-device
+btrfs/ZFS expose no `slaves` links either. On a btrfs- or ZFS-root host —
+the Fedora and openSUSE default — the boot disk can plausibly show no
+`[SYSTEM]` flag at all. Do not treat an unflagged boot disk as proof of
+safety on such a host; this gap must close before any destructive phase.
+
+On an ext4/xfs root on LVM/LUKS/mdraid, confirm your boot disk is marked
+`[SYSTEM: /]` — and on a LUKS or LVM machine, confirm the mark lands on the
+*physical* disk (`sda`, `nvme0n1`), not only on the mapper device
+(`/dev/mapper/vg-root`, `/dev/dm-0`).
+
+If your boot disk is NOT flagged and `findmnt` reported ext4/xfs/etc. (not
+btrfs/zfs), stop. That is the bug this phase exists to prevent, and no
+destructive code may be written until it is fixed.
 
 ## 6. Sizes
 
