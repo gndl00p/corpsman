@@ -3,6 +3,7 @@ from corpsman.identity.linux import enumerate_devices
 
 FIX = os.path.join(os.path.dirname(__file__), "fixtures", "linux", "plain-sata")
 FOURKN = os.path.join(os.path.dirname(__file__), "fixtures", "linux", "fourkn")
+USB = os.path.join(os.path.dirname(__file__), "fixtures", "linux", "usb-stick")
 
 
 def test_finds_the_disk():
@@ -58,3 +59,25 @@ def test_instance_path_points_into_the_devices_tree():
     # stable identity across a /dev renumbering.
     d = enumerate_devices(root=FIX)[0]
     assert "/devices/" in d.instance_path
+
+
+def test_blank_device_serial_falls_back_to_by_id():
+    # A present-but-empty device/serial must not defeat the by-id
+    # fallback. Cheap flash reports blank serials, and by-id is then the
+    # only source.
+    d = enumerate_devices(root=USB)[0]
+    assert d.serial == "12345678"
+
+
+def test_usb_by_id_serial_strips_interface_and_lun_suffix():
+    # udev USB names are usb-<Vendor>_<Product>_<serial>-<iface>:<lun>.
+    # The serial is 12345678, not 12345678-0:0.
+    d = enumerate_devices(root=USB)[0]
+    assert "-0:0" not in (d.serial or "")
+
+
+def test_udev_dedup_suffixed_wwn_does_not_win():
+    # wwn-<x> and wwn-<x>_1 both exist; sorted() puts _1 last, so
+    # last-wins extraction picks the mangled one.
+    d = enumerate_devices(root=FIX)[0]
+    assert d.wwn == "0x5002538f41a1b2c3"

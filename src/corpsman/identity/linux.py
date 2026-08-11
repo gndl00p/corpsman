@@ -68,17 +68,32 @@ def _by_id_map(root):
 def _serial_and_wwn(name, links, root):
     # type: (str, list, str) -> tuple
     serial = _read(os.path.join(root, "sys", "block", name, "device", "serial"))
+    if serial is not None and not serial.strip():
+        # Present-but-blank device/serial (cheap USB bridges expose this
+        # instead of omitting the file). Normalise to None BEFORE the loop
+        # so the by-id fallback below actually runs.
+        serial = None
     wwn = None
     for link in links:
-        if link.startswith("wwn-"):
+        if link.startswith("wwn-") and wwn is None:
+            # First (clean) wwn-* link wins. udev appends _1, _2... to
+            # disambiguate colliding by-id names; sorted() always places
+            # the suffixed superstring after the clean one, so guarding on
+            # wwn is None keeps last-wins from picking the mangled name.
             wwn = link[len("wwn-"):]
         elif serial is None and "_" in link:
-            # ata-Samsung_SSD_870_EVO_1TB_S5Y2NJ0T304891 -> trailing field
+            # ata-Samsung_SSD_870_EVO_1TB_S5Y2NJ0T304891 -> trailing field.
+            # _by_id_map keys links by the basename of their symlink target,
+            # so a -part1 link is filed under the partition's own name
+            # (e.g. sda1) and can never appear in a whole-disk's link list;
+            # no partition guard is needed here.
             candidate = link.rsplit("_", 1)[-1]
-            if candidate and not candidate.startswith("part"):
+            # udev USB names end -<iface>:<lun>, e.g. ...-0:0. That is bus
+            # addressing, not part of the serial.
+            if ":" in candidate and "-" in candidate:
+                candidate = candidate.rsplit("-", 1)[0]
+            if candidate:
                 serial = candidate
-    if serial == "":
-        serial = None
     return serial, wwn
 
 
@@ -96,10 +111,7 @@ def enumerate_devices(root="/"):
         size_sectors = _read_int(os.path.join(base, "size"))
         if not size_sectors:
             continue
-        try:
-            instance_path = os.path.realpath(os.path.join(base, "device"))
-        except OSError:
-            instance_path = base
+        instance_path = os.path.realpath(os.path.join(base, "device"))
         links = by_id.get(name, [])
         serial, wwn = _serial_and_wwn(name, links, root)
         model = _read(os.path.join(base, "device", "model"), "") or ""

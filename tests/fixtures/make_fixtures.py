@@ -58,6 +58,10 @@ def plain_sata(root):
     # SATA disks frequently expose no device/serial; by-id is the reliable source.
     symlink("../../sda", root + "/dev/disk/by-id/ata-Samsung_SSD_870_EVO_1TB_S5Y2NJ0T304891")
     symlink("../../sda", root + "/dev/disk/by-id/wwn-0x5002538f41a1b2c3")
+    # udev appends _1, _2... to disambiguate colliding by-id names. Because
+    # the suffixed name is a superstring, sorted() always places it AFTER the
+    # clean one -- so last-wins extraction silently picks the mangled string.
+    symlink("../../sda", root + "/dev/disk/by-id/wwn-0x5002538f41a1b2c3_1")
     symlink("../../sda1", root + "/dev/disk/by-id/ata-Samsung_SSD_870_EVO_1TB_S5Y2NJ0T304891-part1")
     # Minimal mountinfo: root is on a different disk entirely in this fixture.
     w(root + "/proc/self/mountinfo",
@@ -94,8 +98,49 @@ def fourkn(root):
       "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n")
 
 
+def usb_stick(root):
+    """A cheap USB flash stick: removable, blank device/serial, by-id name
+    carries an interface:LUN suffix that is not part of the serial.
+
+    This is the case types.py's module docstring calls out: "cheap flash
+    reports blank or duplicated serials."
+    """
+    dev = ("/sys/devices/pci0000:00/0000:00:14.0/usb1/1-1/1-1:1.0/host2/"
+           "target2:0:0/2:0:0:0/block/sdd")
+    w(root + dev + "/size", "60653568")
+    w(root + dev + "/removable", "1")
+    w(root + dev + "/queue/rotational", "0")
+    w(root + dev + "/queue/logical_block_size", "512")
+    w(root + dev + "/queue/physical_block_size", "512")
+    # 16-byte SCSI product-id field, space-padded, same convention as the
+    # SATA fixture's device/model.
+    w(root + dev + "/device/model", "Flash Disk      ")
+    w(root + dev + "/device/vendor", "Generic ")
+    # Present but blank: a file containing only a newline. Cheap USB
+    # bridges frequently expose this instead of omitting the file
+    # entirely, and a blank string must not be treated as a real serial.
+    w(root + dev + "/device/serial", "")
+    symlink("../devices/pci0000:00/0000:00:14.0/usb1/1-1/1-1:1.0/host2/"
+            "target2:0:0/2:0:0:0/block/sdd",
+            root + "/sys/block/sdd")
+    symlink("../../devices/pci0000:00/0000:00:14.0/usb1/1-1/1-1:1.0/host2/"
+            "target2:0:0/2:0:0:0/block/sdd",
+            root + "/sys/dev/block/8:48")
+    w(root + "/dev/sdd", "")
+    # udev USB by-id names are usb-<Vendor>_<Product>_<serial>-<iface>:<lun>.
+    # The serial is 12345678, not 12345678-0:0.
+    symlink("../../sdd", root + "/dev/disk/by-id/usb-Generic_Flash_Disk_12345678-0:0")
+    w(root + "/proc/self/mountinfo",
+      "25 1 259:2 / / rw,relatime shared:1 - ext4 /dev/nvme0n1p2 rw\n")
+    w(root + "/proc/swaps", "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n")
+
+
 def main():
-    for name, builder in (("plain-sata", plain_sata), ("fourkn", fourkn)):
+    for name, builder in (
+        ("plain-sata", plain_sata),
+        ("fourkn", fourkn),
+        ("usb-stick", usb_stick),
+    ):
         root = os.path.join(HERE, "linux", name)
         if os.path.isdir(root):
             shutil.rmtree(root)
