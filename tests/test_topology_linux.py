@@ -48,13 +48,19 @@ def test_plain_fixture_root_is_on_a_different_disk():
 def test_resolution_terminates_despite_the_holders_slaves_cycle():
     # dm-0/holders/dm-1 and dm-1/slaves/dm-0 are reciprocal symlinks. This is
     # not a fixture artefact -- the kernel creates them for any dm device
-    # stacked on another, and they exist on real machines right now. A walk
-    # that follows both edge types without tracking what it has visited spins
-    # forever, and it would do so while an operator waits to find out whether
-    # a disk is safe to wipe.
+    # stacked on another, and they exist on real machines right now.
     #
-    # signal.alarm gives this test teeth: without the `seen` guard it would
-    # hang the suite rather than fail it, and a hanging test reports nothing.
+    # This proves resolution terminates in general; it does NOT exercise the
+    # `seen` guard as load-bearing. The current walk only follows `slaves`,
+    # which forms a DAG by kernel design, so it would terminate here even
+    # without the guard -- see the comment on _physical_ancestors() in
+    # topology/linux.py for why the guard is kept anyway (defence for a
+    # future walker that also follows `holders`, and for corrupted/
+    # adversarial /sys content).
+    #
+    # signal.alarm still gives this test teeth against any regression that
+    # DOES make resolution loop -- a hanging test would otherwise report
+    # nothing rather than failing.
     import signal
 
     def _timeout(signum, frame):
@@ -70,11 +76,12 @@ def test_resolution_terminates_despite_the_holders_slaves_cycle():
 
 
 def test_tmpfs_major_zero_does_not_resolve_to_a_block_device():
-    # /run is 0:22. Major 0 is the kernel's anonymous-bdev range, so there is
-    # no sys/dev/block entry for it. Absence must be an expected outcome, not
-    # an error.
-    sysd = system_devices(root=LUKS)
-    assert all(isinstance(v, list) for v in sysd.values())
+    # /run is 0:22 in the LUKS fixture's mountinfo. Major 0 is the kernel's
+    # anonymous-bdev range, so there is no sys/dev/block entry for it, and
+    # resolution must return "" -- not fall back to guessing a device name --
+    # so the tmpfs mount contributes no device to the map at all.
+    from corpsman.topology.linux import _name_from_majmin
+    assert _name_from_majmin(LUKS, "0:22") == ""
 
 
 def test_unreadable_mountinfo_raises_rather_than_returning_empty():

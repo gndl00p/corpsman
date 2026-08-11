@@ -93,6 +93,29 @@ def test_no_device_write_paths_in_phase_one():
     )
 
 
+def test_only_run_py_imports_subprocess():
+    """Every external process invocation must go through corpsman.run.run(),
+    which pins LC_ALL=C/LANG=C. A second, unpinned subprocess import
+    anywhere else in the tree is a silent locale leak into a parse that
+    feeds a health verdict.
+    """
+    offenders = []
+    for path in _python_files():
+        if os.path.relpath(path, SRC) == "run.py":
+            continue
+        with open(path) as f:
+            tree = ast.parse(f.read(), path)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.split(".")[0] == "subprocess":
+                        offenders.append(path)
+            elif isinstance(node, ast.ImportFrom):
+                if (node.module or "").split(".")[0] == "subprocess":
+                    offenders.append(path)
+    assert offenders == [], "subprocess imported outside run.py: %r" % offenders
+
+
 def test_flavor_strings_are_not_in_non_cli_modules():
     """Corpsman voice belongs in terminal output only, never in data paths."""
     flavor = ("CORPSMAN UP", "expectant", "walking wounded", "DEVIL DOC")

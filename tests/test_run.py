@@ -23,7 +23,7 @@ def test_run_sets_timed_out_only_on_timeout():
     r = run(["python3", "-c", "print('hi')"])
     assert r.timed_out is False
 
-def test_run_marks_timeout(self=None):
+def test_run_marks_timeout():
     r = run(["python3", "-c", "import time; time.sleep(5)"], timeout=1)
     assert r.timed_out is True
     assert r.found is True

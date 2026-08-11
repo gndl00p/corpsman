@@ -256,3 +256,203 @@ def test_unmatched_device_filter_exits_three(monkeypatch):
 
     assert rc == 3
     assert rc != 0
+
+
+# --- C1/C2/C3 (final-review) -----------------------------------------------
+#
+# The final whole-branch review found the human output path bypasses the
+# collision guard (_human() read d["serial"] instead of d["confirm"]),
+# that _human() itself had zero test coverage (three separate mutations --
+# no-op, marker suppressed, CORPSMAN UP suppressed -- all left 117/117
+# green), and that the one existing collision-related test pins
+# build_report's signature contract rather than its actual call site in
+# cmd_inspect. All three are covered below.
+
+def _mkdev_report(**kw):
+    # type: (...) -> dict
+    """A single report['devices'] entry, with every field _human() reads
+    given a sane default so each test only needs to override what it's
+    exercising.
+    """
+    base = dict(
+        name="sda", path="/dev/sda", identity_token="abc123def456",
+        confirm="abc123def456", model="Test Model", serial=None, wwn=None,
+        size_bytes=1000000000000, logical_sector=512, physical_sector=512,
+        bus="sata", rotational=False, removable=False,
+        system_state=[], health="REUSE", reasons=["clean"], cabling=None,
+    )
+    base.update(kw)
+    return base
+
+
+def _human_output(devices):
+    from corpsman import cli
+    stream = io.StringIO()
+    cli._human({"schema": 1, "devices": devices}, stream)
+    return stream.getvalue()
+
+
+def test_human_output_uses_confirm_not_raw_serial_on_collision():
+    # C1: two real devices sharing a serial, run through the actual
+    # build_report -> _human pipeline. Before the fix, both printed
+    # "#SAME123"; the collision guard in identity/collisions.py -- which
+    # exists specifically to survive this case -- was dead code on the
+    # human path.
+    from corpsman import cli
+    from corpsman.types import Device
+
+    def dev(name, serial):
+        return Device(
+            path="/dev/" + name, name=name, instance_path="/dev/" + name,
+            model="Model", serial=serial, wwn=None, size_bytes=1000,
+            logical_sector=512, physical_sector=512, bus="sata",
+            rotational=False, removable=False,
+        )
+
+    a = dev("sda", "SAME123")
+    b = dev("sdb", "SAME123")
+    all_devices = [a, b]
+
+    rep = cli.build_report(all_devices, all_devices, {}, {})
+    out = _human_output(rep["devices"])
+
+    assert a.identity_token in out
+    assert b.identity_token in out
+    assert "#SAME123" not in out
+
+
+def test_human_shows_system_marker_when_flagged():
+    # C2: positive-content coverage. Deleting the [SYSTEM: ...] marker
+    # from _human() left 117/117 passing before this test existed --
+    # PHASE1-SMOKE.md makes this marker the phase's acceptance criterion.
+    out = _human_output([_mkdev_report(system_state=["/"])])
+    assert "[SYSTEM: /]" in out
+
+
+def test_human_omits_system_marker_when_clean():
+    out = _human_output([_mkdev_report(system_state=[])])
+    assert "[SYSTEM" not in out
+
+
+def test_human_shows_corpsman_up_for_scrap():
+    # C2: `** CORPSMAN UP **` never printing also left 117/117 passing.
+    out = _human_output([_mkdev_report(health="SCRAP", reasons=["bad"])])
+    assert "** CORPSMAN UP **" in out
+
+
+def test_human_omits_corpsman_up_for_healthy():
+    out = _human_output([_mkdev_report(health="REUSE")])
+    assert "CORPSMAN UP" not in out
+
+
+def test_human_shows_device_path_and_confirm_string():
+    out = _human_output([_mkdev_report(path="/dev/sda", confirm="XYZ789")])
+    assert "/dev/sda" in out
+    assert "XYZ789" in out
+
+
+def _dup_serial_root(tmp_path):
+    """Two whole disks with an identical device/serial, enumerable via
+    real sysfs paths -- the minimal fixture needed to run the collision
+    scenario through cmd_inspect end to end rather than by calling
+    build_report directly.
+    """
+    root = str(tmp_path / "root")
+    for name in ("sda", "sdb"):
+        base = os.path.join(root, "sys", "block", name)
+        os.makedirs(os.path.join(base, "queue"))
+        os.makedirs(os.path.join(base, "device"))
+        with open(os.path.join(base, "size"), "w") as f:
+            f.write("1953525168\n")
+        with open(os.path.join(base, "removable"), "w") as f:
+            f.write("0\n")
+        with open(os.path.join(base, "queue", "rotational"), "w") as f:
+            f.write("0\n")
+        with open(os.path.join(base, "queue", "logical_block_size"), "w") as f:
+            f.write("512\n")
+        with open(os.path.join(base, "queue", "physical_block_size"), "w") as f:
+            f.write("512\n")
+        with open(os.path.join(base, "device", "model"), "w") as f:
+            f.write("Test Disk       \n")
+        with open(os.path.join(base, "device", "serial"), "w") as f:
+            f.write("DUPTWIN12345\n")
+    os.makedirs(os.path.join(root, "proc", "self"))
+    with open(os.path.join(root, "proc", "self", "mountinfo"), "w") as f:
+        f.write("")
+    with open(os.path.join(root, "proc", "swaps"), "w") as f:
+        f.write("Filename\n")
+    return root
+
+
+def test_device_filter_confirm_survives_collision_through_cmd_inspect(monkeypatch, tmp_path):
+    # C3: the prior collision regression test (test_filtering_by_device_
+    # does_not_hide_a_serial_collision, above) calls build_report directly
+    # with hand-supplied arguments, so it pins the signature contract, not
+    # the actual call in cmd_inspect. Reverting cli.py's
+    # `build_report(shown, all_devices, ...)` to
+    # `build_report(shown, shown, ...)` passes 117/117 because nothing
+    # exercises the --device-filtered path through the real CLI dispatch.
+    # This does.
+    from corpsman import cli
+    from corpsman.identity.linux import enumerate_devices
+
+    monkeypatch.setattr(cli.platform_, "has_backend", lambda: True)
+    monkeypatch.setattr(cli.platform_, "is_privileged", lambda: True)
+    monkeypatch.setattr(
+        cli, "collect",
+        lambda device, probe, runner=None: smart("sata_healthy.json"),
+    )
+
+    root = _dup_serial_root(tmp_path)
+    rc, out = _run(cli, _privileged_args(root, device="sda", as_json=True))
+
+    report = json.loads(out)
+    assert len(report["devices"]) == 1
+    reported = report["devices"][0]
+
+    all_devs = enumerate_devices(root=root)
+    sda_token = [d for d in all_devs if d.name == "sda"][0].identity_token
+
+    assert reported["confirm"] == sda_token
+    assert reported["confirm"] != "DUPTWIN12345"
+
+
+# --- I2/I3 (final-review) ---------------------------------------------------
+
+def test_unexpected_exception_exits_three_not_one(monkeypatch, capsys):
+    # I2: chmod 000 on <root>/sys/block makes PermissionError escape
+    # enumerate_devices, and main() had no top-level handler -- Python
+    # exits 1 on an uncaught exception, which README/PHASE1-SMOKE both
+    # sell as "a warning drive is present" in the RMM contract. A crash
+    # must never be graded as a health result.
+    from corpsman import cli
+
+    monkeypatch.setattr(cli.platform_, "has_backend", lambda: True)
+    monkeypatch.setattr(cli.platform_, "is_privileged", lambda: True)
+
+    def boom(root=None):
+        raise PermissionError("[Errno 13] Permission denied: 'sys/block'")
+
+    monkeypatch.setattr(cli.identity_linux, "enumerate_devices", boom)
+
+    rc = cli.main(["inspect", "--root", LUKS])
+    captured = capsys.readouterr()
+
+    assert rc == 3
+    assert "PermissionError" in captured.err
+
+
+def test_unsupported_platform_exits_three_and_names_platform(monkeypatch):
+    # I3: deleting `if not platform_.has_backend(): ...` from cmd_inspect
+    # passes 117/117 because every other CLI test monkeypatches
+    # has_backend to True. This is a named Global Constraint with nothing
+    # behind it until now.
+    from corpsman import cli
+
+    monkeypatch.setattr(cli.platform_, "has_backend", lambda: False)
+    monkeypatch.setattr(cli.platform_, "detect", lambda: "windows")
+
+    rc, out = _run(cli, _privileged_args(LUKS))
+
+    assert rc == 3
+    assert "windows" in out
