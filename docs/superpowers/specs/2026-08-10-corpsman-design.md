@@ -434,11 +434,17 @@ well-documented way to convert a drive a professional recovery house could have 
 one nobody can. The most valuable case — a client's only copy on a dying disk — is exactly
 the case where an amateur retry loop does the most damage.
 
-So `image` checks health first. On a `SCRAP` or `UNKNOWN` verdict it prints the specific
-failing attributes, states plainly that continuing may destroy data a recovery lab could
-have retrieved, and refuses unless `--accept-media-risk` is passed. For genuinely
-irreplaceable data the correct advice is to stop and send the drive out, and the tool says
-so rather than quietly proceeding.
+So health gates read intensity — but the gate scales with risk instead of being uniform,
+because imaging a degraded drive **is** the recommended action and blocking it would be
+backwards. The full ladder is specified in the
+[recovery design](2026-08-11-recovery-design.md); in short, a healthy drive runs with an
+informational note, a degraded one warns and takes a keystroke, a `SCRAP`/`UNKNOWN` one
+requires typing the serial suffix, and only mechanical-failure indicators — SMART spin-up
+failure, or IO errors present at enumeration — escalate to naming a recovery lab as the
+honest recommendation.
+
+Every level still proceeds if the operator insists. It is their drive and their client, and
+a tool that flatly refuses gets replaced by `dd`, which warns about nothing at all.
 
 ### The mapfile is GNU ddrescue's format exactly, or it is not claimed
 

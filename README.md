@@ -66,10 +66,32 @@ mode banner is always in the header.
 
 ## Recovery
 
-Every recovery verb takes an **image**, not a device. That's the professional discipline,
-not a convenience: a recovery scan is thousands of seeks across a drive that's already
-failing, which is a documented way to finish it off. Image the patient, then never touch it
-again. `--live` exists and refuses on a `SCRAP` verdict without `--accept-media-risk`.
+Heavy recovery defaults to working from an **image** rather than the live device — a
+full-surface scan is thousands of seeks across a drive that's already failing, which is a
+documented way to finish it off, and working from an image also makes writing output onto
+the source structurally impossible.
+
+**But that rule gets out of the way when it's ceremony.** A 4 TB disk with clean SMART and a
+lost partition table doesn't need an eight-hour image before reading a handful of sectors,
+and demanding one assumes scratch space the bench often doesn't have. `parts` in its
+table-reading form defaults to live. A safety control people route around protects nobody.
+
+Ceremony scales with the product of health and read intensity:
+
+| Health | What running live costs you |
+|---|---|
+| `REUSE` | Runs. One informational line. No prompt, no flag. |
+| `SCRATCH_ONLY` | One warning naming the attributes, `y/N`. |
+| `SCRAP` / `UNKNOWN` | Serious warning, type the serial suffix — not a `y`. |
+| Mechanical failure | Names a recovery lab as the honest answer, needs `--accept-media-risk`. |
+
+**Every level still proceeds if you insist.** It's your drive and your client, and a tool
+that flatly refuses gets replaced by `dd`, which warns about nothing at all.
+
+If a live run starts throwing IO errors that weren't there at enumeration, the drive is
+degrading under the workload right now — it halts, reports what it got, and offers to hand
+off to `doc image`, which reads in an order built to capture the most data before a dying
+drive quits. Already-read regions carry over rather than starting again.
 
 | Verb | What it does |
 |---|---|

@@ -12,25 +12,82 @@ Getting client data back, as opposed to `doc image` which captures a device and
     doc recover parts    <image|device>     # scan for lost partitions, read-only
     doc recover parts --repair <device>     # write a rebuilt table  [DEVIL DOC]
 
-## The governing rule: recover from the image, not the patient
+## Working from an image, and when that rule should get out of the way
 
-Every recovery verb takes an **image file** as its default input, not a device. This is
-not a convenience choice, it is the professional discipline the whole subsystem is built
-around:
+Imaging first is the right default for heavy recovery on a compromised drive, for three
+real reasons:
 
-- A recovery scan is thousands of seeks across the full surface. On a drive that is already
-  failing — which is the drive people want recovered — that workload is a well-documented
-  way to finish it off. The first thing a recovery house does is image the patient and then
-  never touch it again.
-- Carving produces output. Output must never land on the source device, and operating from
-  an image makes that structurally impossible rather than a check that can be forgotten.
-- An image is reproducible. A failing drive gives different answers on successive reads, so
-  a recovery run against live media cannot be repeated or reviewed.
+- A full-surface scan is thousands of seeks. On a drive that is already failing — which is
+  the drive people want recovered — that workload is a well-documented way to finish it off.
+  The first thing a recovery house does is image the patient and then never touch it again.
+- Working from an image makes writing output onto the source structurally impossible,
+  rather than a check that can be forgotten.
+- A failing drive gives different answers on successive reads, so a live run cannot be
+  repeated or reviewed. An image can.
 
-Running against live media is possible with `--live`, and refuses without
-`--accept-media-risk` when health is `SCRAP` or `UNKNOWN`, matching `doc image`. The TUI
-offers "image first, then recover" as the default path and requires a deliberate detour to
-do anything else.
+**None of that applies to a healthy drive with a logical problem**, which is the majority of
+real cases. A 4 TB disk with a clean SMART report and a lost partition table does not need
+an eight-hour image before reading a handful of sectors, and demanding one assumes free
+scratch space the bench frequently does not have. A rule that is ceremony in the common case
+gets worked around, and a safety control people route around protects nobody.
+
+So live access is a first-class path, and the ceremony scales with actual risk rather than
+being uniform.
+
+### Risk is the product of health and read intensity
+
+Verbs differ enormously in how hard they work the media:
+
+| Verb | Read pattern | Intensity |
+|---|---|---|
+| `parts` (table read) | A few dozen sectors at known offsets, plus the GPT backup at the end | Trivial |
+| `parts` (signature scan) | Full surface, sequential | Heavy |
+| `carve` | Full surface, sequential | Heavy |
+| `undelete` | Metadata regions, then targeted extent reads — fewer bytes than carving, but seek-heavy | Moderate |
+
+`parts` in its table-reading form **defaults to live**, because imaging 4 TB to read sector 0
+and a backup GPT header is absurd. `carve` and `undelete` default to image-based and take
+`--live` to override.
+
+### The ladder
+
+What the operator has to do to run live, by health verdict:
+
+1. **`REUSE`** — runs. A single informational line notes that imaging first is safer if the
+   data is irreplaceable. No prompt, no flag. This is the common case and it should feel
+   like the tool is helping.
+2. **`SCRATCH_ONLY`** — one warning naming the attributes that produced the verdict, and a
+   `y/N` confirmation. One keystroke.
+3. **`SCRAP` or `UNKNOWN`** — the serious warning. Prints the specific failing attributes,
+   states concretely that retry loops on failing media can convert a recoverable drive into
+   one nobody can read, and that a recovery lab could likely still get this data today but
+   may not after this run. Requires typing the device's serial suffix, not a `y`.
+4. **Mechanical failure indicators** — SMART reporting spin-up failure, or IO errors already
+   occurring during enumeration. This is the cleanroom case, where the correct advice is to
+   power the drive down and send it out. The tool says so and requires
+   `--accept-media-risk` explicitly. It still proceeds if the operator insists, because it
+   is their drive and their client, and a tool that simply refuses gets replaced by `dd`.
+
+`--accept-media-risk` pre-answers levels 2 through 4 for scripted use.
+
+### Bailing out mid-run
+
+If a live run starts throwing IO errors that were not present at enumeration, the drive is
+degrading under the workload right now and continuing is the damage. The run halts, reports
+what was recovered so far, and offers to switch to `doc image` — which is built for exactly
+this and reads in an order designed to capture the most data before a dying drive gives up.
+Accepting hands off to the imager with the already-read regions marked complete rather than
+starting over.
+
+## `doc image` on a failing drive
+
+An earlier draft had `image` refuse on a `SCRAP` verdict without a flag. That was backwards.
+Imaging a degraded drive **is** the recommended action — it is the thing that gets the data
+somewhere safe, and the alternative is usually doing nothing or doing something worse.
+
+`image` therefore warns and proceeds on confirmation for ordinary degraded drives. It
+escalates to the level 4 treatment above only for mechanical-failure indicators, where
+powering the drive at all is the risk and a lab is the honest recommendation.
 
 ## `doc recover parts` — partition recovery
 
