@@ -7,9 +7,9 @@
 ## What it is
 
 A zero-dependency, single-file terminal application that handles the whole life-end workflow
-for storage media on a bench: figure out what the drive is, decide whether it is worth
-keeping, capture what is on it, get data back off it, destroy what is on it, and leave a
-record.
+for storage media on a bench: figure out what the drive is, decide whether it is worth keeping, capture
+what is on it, get data back off it, move it to a replacement, destroy what is on it, and
+leave a record.
 
 A full-screen TUI is the primary interface for interactive bench work. Every operation is
 also a CLI subcommand, because the RMM check, the MCP server, and batch runs need one.
@@ -30,6 +30,7 @@ Invoked as `doc`.
     # DEVIL DOC mode only:
     doc wipe     /dev/sdb            # the zeroize engine
     doc restore  in.img /dev/sdb     # writes an image ONTO a device
+    doc clone    /dev/sdb /dev/sdc   # device to device, no intermediate file
     doc recover  parts --repair /dev/sdb   # writes a rebuilt partition table
 
 `recover` names the recovery family — getting data back. Capture is `image`, which is what
@@ -97,7 +98,7 @@ exercised least would be the one wired to destruction.
 The tool boots into **AID STATION** — read-only. `inspect`, `test`, `image`, `recover`
 (except `parts --repair`), and `ledger` work.
 
-Destructive operations — `wipe`, `restore`, `recover parts --repair`, and
+Destructive operations — `wipe`, `restore`, `clone`, `recover parts --repair`, and
 `test --destructive` — are hidden from `--help`, absent from the MCP tool list and from the
 TUI's action bar, and refuse at dispatch. Hiding is a usability affordance; the enforcement
 is at dispatch and again immediately before the first destructive syscall.
@@ -419,6 +420,9 @@ runs in AID STATION. `restore` writes an image onto a device, which destroys wha
 there, so it is DEVIL DOC only and sits behind the same topology refusals, identity
 confirmation, and device locking as `wipe`.
 
+`clone` is the two fused into one pass, device to device, with no intermediate file — see
+below.
+
 Getting data back out of an image is a separate subsystem — see the
 [recovery design](2026-08-11-recovery-design.md).
 
@@ -471,6 +475,84 @@ to open. There is no middle option.
 - Refuses to write the image onto the source device, or onto a filesystem without room,
   checked before starting rather than 3 TB in.
 
+## `doc clone` — device to device
+
+    doc clone <source> <target>     [DEVIL DOC]
+
+Failing drive to its replacement, HDD to SSD, client machine to a spare. Same error-tolerant
+read engine as `image`, writing straight through to the target instead of to a file.
+
+Worth being its own verb rather than telling people to pipe `image` into `restore`: it needs
+no scratch space, which matters because cloning a 2 TB drive otherwise requires 2 TB free
+that a bench often does not have. The trade is real and stated in the help text — a clone
+produces no second copy, so if the source dies partway through, there is neither a working
+original nor a usable image. When free space exists and the source is degraded,
+image-then-restore is the better play and the tool says so.
+
+### Source/target inversion is the failure mode this design exists to stop
+
+Wiping the wrong drive at least destroys one thing. Cloning backwards destroys the client's
+data *and* consumes the copy that would have restored it, in one operation, and the operator
+usually does not find out until later.
+
+- **Source and target are confirmed separately**, each with its own identity card and its own
+  typed serial suffix. There is no single confirmation covering both.
+- **The target's card is rendered in the danger style and labelled `WILL BE DESTROYED`.** No
+  screen ever shows both devices without saying which one dies.
+- **Inversion heuristics run before anything is written.** If the target holds a valid
+  partition table with recognisable filesystems and the source does not, or the target is
+  substantially fuller than the source, or the source is blank, the tool stops and says
+  plainly: *this looks like source and target are reversed.* Overriding requires re-typing
+  both serials in the correct roles. Most real inversions are caught by exactly this check.
+- **Order is fixed and explicit.** `clone <source> <target>` — never inferred from device
+  order, size, or which one was selected first.
+- Both devices take the exclusive lock, not just the target.
+- Refuses when source and target are the same device, or when one is an ancestor or
+  descendant of the other in the topology graph.
+
+### Geometry, and the reasons clones fail to boot
+
+- **Target smaller than source:** refused. Making it fit requires shrinking filesystems,
+  which is filesystem repair and deliberately out of scope. The tool says to shrink first
+  with a filesystem tool, or to use `image` plus selective `restore`.
+- **Target larger:** fine. Trailing space is left unallocated, and the tool reports how much
+  rather than silently leaving it. Expanding the last partition is filesystem work and is
+  not done here.
+- **Sector size mismatch:** a 512-byte-sector source cloned to a 4Kn target produces a disk
+  that is misaligned and frequently unbootable. Detected before starting and refused unless
+  explicitly overridden, because the failure appears much later and looks like something else
+  entirely.
+- **GPT disk GUID collision:** a byte-exact clone carries the source's GPT disk GUID and
+  partition GUIDs. With both drives attached to one machine — the normal state during a
+  migration — Windows and several Linux boot paths behave unpredictably about which one they
+  mount. After a successful clone the tool offers to regenerate the target's disk GUID and
+  partition GUIDs, and explains why. Most cloning tools get this wrong and the resulting
+  bug is miserable to diagnose.
+- The GPT backup header is relocated to the end of the *target*, since a larger target
+  otherwise carries a backup header stranded in the middle of the disk where nothing will
+  find it.
+
+### Reading only what is used
+
+A full-surface clone of a 2 TB drive holding 200 GB moves ten times more data than it needs
+to. Where the source's partition scheme and filesystems are ones the recovery subsystem can
+already parse, `--used-only` reads allocation bitmaps and copies just the blocks in use,
+zeroing the rest on the target.
+
+This depends on the filesystem parsers from the recovery work, so it lands after them. Until
+then, and always for unrecognised filesystems, the clone is full-surface. The tool never
+guesses at allocation — an unparsed filesystem is copied whole.
+
+### Verification
+
+A clone nobody verified is a guess. After completion the tool re-reads both devices and
+compares hashes over the copied extents, reporting any divergence. Bad sectors on the source
+are filled with a known pattern, logged by LBA, and named in the summary — never silently
+zeroed, because a zero-filled hole in a clone is corruption that looks like data.
+
+The run appends to the ledger with both device identities, extents copied, bad-sector count,
+verification result, and whether GUIDs were regenerated.
+
 ## `doc --json` / RMM mode
 
 Every subcommand emits a stable JSON document with `--json`, and sets exit codes for
@@ -509,7 +591,7 @@ how trustworthy the client is.
 requested for a single specified record, and any unredacted access is itself written to
 the ledger.
 
-**Never exposed:** `wipe` and `restore`. Not behind a flag, not behind a confirmation,
+**Never exposed:** `wipe`, `restore`, and `clone`. Not behind a flag, not behind a confirmation,
 not present in the tool list at all. The server runs permanently in AID STATION and its
 transport is not a TTY, so it cannot arm even in principle — but the tools are also
 simply absent, because defense in depth is cheap here. Drive destruction requires a human

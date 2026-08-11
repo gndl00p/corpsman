@@ -1,7 +1,8 @@
 # corpsman
 
 Drive doctor for the bench. Figures out what the drive is, whether it is worth keeping,
-captures what is on it, gets data back off it, destroys what is on it, and leaves a record.
+captures what is on it, gets data back off it, moves it to a replacement, destroys what is
+on it, and leaves a record.
 
 One file. Python 3.8+. Windows, macOS, Linux. No dependencies, no install step, runs
 offline from a rescue USB. (The single file is a build artifact — source is one module per
@@ -27,6 +28,7 @@ doc serve-mcp                   # read-only MCP server
 
 doc wipe    /dev/sdb                   # DEVIL DOC mode only
 doc restore in.img /dev/sdb            # DEVIL DOC mode only
+doc clone   /dev/sdb /dev/sdc          # DEVIL DOC mode only
 doc recover parts --repair /dev/sdb    # DEVIL DOC mode only
 ```
 
@@ -63,6 +65,52 @@ raw mode and no escape sequences. On a bench those aren't hypothetical.
 System-state ancestors render locked and aren't selectable for destructive actions at all —
 the refusal isn't a dialog you can click past. Arming still needs the held chord, and the
 mode banner is always in the header.
+
+## Cloning
+
+`doc clone <source> <target>` — failing drive to its replacement, HDD to SSD, machine to a
+spare. Same error-tolerant read engine as `image`, writing straight through with no
+intermediate file, so it needs no scratch space. The trade is stated in the help text: a
+clone leaves no second copy, so if the source dies partway you have neither a working
+original nor a usable image. With free space and a degraded source, image-then-restore is
+the better play.
+
+**Source/target inversion is the failure mode this design exists to stop.** Wiping the wrong
+drive destroys one thing. Cloning backwards destroys the client's data *and* consumes the
+copy that would have restored it, in a single operation, and you usually don't find out
+until later.
+
+- Source and target are confirmed **separately**, each with its own identity card and typed
+  serial suffix. No single confirmation covers both.
+- The target's card renders in the danger style, labelled `WILL BE DESTROYED`. No screen
+  shows both devices without saying which one dies.
+- **Inversion heuristics run before any write.** Target holds a valid partition table with
+  recognisable filesystems and the source doesn't? Target substantially fuller than source?
+  Source blank? It stops and says *this looks reversed*. Overriding means re-typing both
+  serials in their correct roles.
+- Direction is positional and never inferred from size, device order, or selection order.
+
+**Why clones fail to boot**, all handled:
+
+- **GPT disk GUID collision** — a byte-exact clone carries the source's disk and partition
+  GUIDs, and with both drives attached during a migration, Windows and several Linux boot
+  paths get unpredictable about which they mount. It offers to regenerate the target's GUIDs
+  and explains why. Most cloning tools get this wrong and the resulting bug is miserable.
+- **Sector size mismatch** — 512e source onto a 4Kn target is misaligned and usually
+  unbootable. Refused before starting, because the symptom shows up much later looking like
+  something else.
+- **Stranded backup GPT** — relocated to the end of the target, not left mid-disk on a larger
+  drive where nothing will find it.
+- Target smaller than source is refused; making it fit means shrinking filesystems, which is
+  filesystem repair and out of scope. Larger is fine, trailing space reported not hidden.
+
+`--used-only` reads allocation bitmaps and copies just the blocks in use — ten times faster
+on a 2 TB drive holding 200 GB. Depends on the recovery subsystem's filesystem parsers, so
+it lands after them; unrecognised filesystems are always copied whole rather than guessed at.
+
+Verified on completion by re-reading both devices and comparing hashes. Bad sectors are
+pattern-filled and logged by LBA, never silently zeroed — a zero-filled hole in a clone is
+corruption that looks like data.
 
 ## Recovery
 
@@ -247,7 +295,7 @@ document. Full detail in the [wipe spec](docs/superpowers/specs/2026-08-10-zeroi
 `test_status`, `read_ledger` — over stdio, implemented in stdlib JSON-RPC so it needs no
 SDK.
 
-**`wipe` and `restore` are not exposed.** Not behind a flag, not behind a confirmation,
+**`wipe`, `restore`, and `clone` are not exposed.** Not behind a flag, not behind a confirmation,
 not present in the advertised tool list. The transport isn't a TTY, so the server can't
 arm even in principle — but the tools are also simply absent, because defense in depth is
 cheap here. Drive destruction requires a human who held a physical chord and typed an
