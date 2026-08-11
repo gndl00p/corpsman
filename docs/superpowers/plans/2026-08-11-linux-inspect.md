@@ -2385,6 +2385,11 @@ git commit -m "docs: phase 1 status and read-only smoke procedure"
 - **The TUI.** It is built on top of commands that already work. Phase 1 is CLI only.
 - **The ledger.** Its first real consumer is `wipe`. Building it here would mean designing its schema against a command that does not need it.
 - **`test`, `image`, MCP, RMM mode.** All downstream of this foundation.
+- **Floppy, optical, and tape enumeration.** Task 4's `_SKIP_PREFIXES` excludes `sr` and
+  `fd`. The parent design promises these media, and they will be enumerated when the
+  media-class layer lands — they carry no SMART, so including them in a SMART-driven
+  `inspect` would produce a list of devices that can only ever report `UNKNOWN`. This is a
+  deliberate deferral, not an oversight; the exclusion list is the single line to change.
 
 ## Self-review notes
 
