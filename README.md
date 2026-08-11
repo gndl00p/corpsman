@@ -13,7 +13,7 @@ execution path is the wrong trade for a tool whose failure modes are destructive
 > **Status: Phase 1 — Linux `inspect` only.** `doc inspect [device] [--json]` is the
 > only command that exists. Everything else shown below — `test`, `image`, `clone`,
 > `wipe`, `recover`, `ledger`, `serve-mcp`, the TUI — is design in
-> `docs/superpowers/specs/`, not code. 117 tests pass (`python3 -m pytest tests/ -v`).
+> `docs/superpowers/specs/`, not code. 127 tests pass (`python3 -m pytest tests/ -v`).
 > `doc` itself is a build artifact (`python3 build.py`, gitignored) assembled from
 > `src/corpsman/`.
 >
